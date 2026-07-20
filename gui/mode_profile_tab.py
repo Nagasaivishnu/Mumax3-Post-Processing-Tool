@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 from gui.plot_canvas import PlotCanvas
 from processing.mode_profile import (
     load_dataset, compute_fft, find_fmr_peaks, get_spatial_profile,
+    fft_cache_path, save_fft_result, load_fft_result,
     COMPONENT_MAP, AVG_AXIS_MAP, AVG_TO_VIEW,
 )
 
@@ -70,25 +71,60 @@ class _LoadWorker(QThread):
 
 
 class _FFTWorker(QThread):
-    """Runs the FFT computation in a background thread."""
-    finished = pyqtSignal(object)   # result dict | None
+    """
+    Runs the FFT in a background thread, with file-based caching.
+
+    If *use_cache* is True and a cache file matching the FFT parameters
+    exists in *sim_dir*, it is loaded instead of recomputing.
+    Otherwise the FFT is computed and the result saved to that cache file.
+    """
+    finished = pyqtSignal(object, str)   # result dict, source description
     error    = pyqtSignal(str)
 
-    def __init__(self, m_raw, component, dt, t_start, t_end, parent=None):
+    def __init__(self, m_raw, component, dt, t_start, t_end,
+                 sim_dir: str, use_cache: bool = True, parent=None):
         super().__init__(parent)
         self.m_raw     = m_raw
         self.component = component
         self.dt        = dt
         self.t_start   = t_start
         self.t_end     = t_end
+        self.sim_dir   = sim_dir
+        self.use_cache = use_cache
 
     def run(self) -> None:
         try:
+            cache = fft_cache_path(
+                self.sim_dir, self.component,
+                self.dt, self.t_start, self.t_end,
+            )
+
+            # ── fast path: load cached FFT ────────────────────────────
+            if self.use_cache and cache.exists():
+                result = load_fft_result(cache)
+                self.finished.emit(result, f"cache: {cache.name}")
+                return
+
+            # ── compute + save ────────────────────────────────────────
+            if self.m_raw is None:
+                raise ValueError(
+                    "No dataset loaded and no matching FFT cache file found.\n"
+                    "Load the OVF dataset first."
+                )
             result = compute_fft(
                 self.m_raw, self.component,
                 self.dt, self.t_start, self.t_end,
             )
-            self.finished.emit(result)
+            try:
+                save_fft_result(
+                    self.sim_dir, self.component,
+                    self.dt, self.t_start, self.t_end, result,
+                )
+                source = f"computed, saved → {cache.name}"
+            except OSError as exc:
+                logger.warning("Could not save FFT cache: %s", exc)
+                source = "computed (cache save failed)"
+            self.finished.emit(result, source)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -149,8 +185,22 @@ class SpinWaveModeProfileTab(QWidget):
         load_layout = QVBoxLayout(load_grp)
 
         self._load_btn = QPushButton("Load OVF Dataset")
+        self._load_btn.setToolTip(
+            "Load OVF/NPY raw data.\n"
+            "Skipped automatically when an FFT cache file matching the\n"
+            "current Processing parameters already exists (the FFT is\n"
+            "loaded from it directly instead)."
+        )
         self._load_btn.clicked.connect(self._do_load)
         load_layout.addWidget(self._load_btn)
+
+        self._force_load_chk = QCheckBox("Load raw data even if FFT cache exists")
+        self._force_load_chk.setToolTip(
+            "Override the FFT-cache check: always load the OVF/NPY raw\n"
+            "data. Needed e.g. before 'Recompute FFT (ignore cache)' or\n"
+            "when trying different FFT parameters."
+        )
+        load_layout.addWidget(self._force_load_chk)
 
         self._progress = QProgressBar()
         self._progress.setVisible(False)
@@ -186,8 +236,21 @@ class SpinWaveModeProfileTab(QWidget):
         proc_form.addRow("t end (s):", self._tend_edit)
 
         self._fft_btn = QPushButton("Compute FFT")
-        self._fft_btn.clicked.connect(self._do_fft)
+        self._fft_btn.setToolTip(
+            "Uses a saved FFT cache file if one matches the current\n"
+            "parameters (component, dt, time window); otherwise computes\n"
+            "and saves a new cache file in the simulation directory."
+        )
+        self._fft_btn.clicked.connect(lambda: self._do_fft(use_cache=True))
         proc_form.addRow("", self._fft_btn)
+
+        self._fft_force_btn = QPushButton("Recompute FFT (ignore cache)")
+        self._fft_force_btn.setToolTip(
+            "Recompute the FFT from the loaded dataset even if a cache\n"
+            "file exists, and overwrite the cache file."
+        )
+        self._fft_force_btn.clicked.connect(lambda: self._do_fft(use_cache=False))
+        proc_form.addRow("", self._fft_force_btn)
 
         ctrl.addWidget(proc_grp)
 
@@ -297,12 +360,35 @@ class SpinWaveModeProfileTab(QWidget):
     # Loading slot
     # ------------------------------------------------------------------
 
+    def _current_cache_path(self, sim_dir: Path) -> Path | None:
+        """FFT cache path for the current Processing parameters, or None if
+        the parameter fields cannot be parsed."""
+        try:
+            dt      = float(self._dt_edit.text())
+            t_start = float(self._tstart_edit.text())
+            t_end   = float(self._tend_edit.text())
+        except ValueError:
+            return None
+        component = COMPONENT_MAP[self._comp_combo.currentText()]
+        return fft_cache_path(sim_dir, component, dt, t_start, t_end)
+
     def _do_load(self) -> None:
         sim_dir = self._current_sim_dir()
         if sim_dir is None:
             QMessageBox.information(self, "No Dataset",
                                     "Add table.txt files in the File Manager first.")
             return
+
+        # ── skip raw-data loading when a matching FFT cache exists ────
+        if not self._force_load_chk.isChecked():
+            cache = self._current_cache_path(sim_dir)
+            if cache is not None and cache.exists():
+                self._status_lbl.setText(
+                    f"FFT cache found ({cache.name}) — raw data load skipped. "
+                    "Loading FFT from cache …"
+                )
+                self._do_fft(use_cache=True)
+                return
 
         self._raw_data  = None
         self._fft_result = None
@@ -340,9 +426,11 @@ class SpinWaveModeProfileTab(QWidget):
     # FFT slot
     # ------------------------------------------------------------------
 
-    def _do_fft(self) -> None:
-        if self._raw_data is None:
-            QMessageBox.information(self, "No Data", "Load a dataset first.")
+    def _do_fft(self, use_cache: bool = True) -> None:
+        sim_dir = self._current_sim_dir()
+        if sim_dir is None:
+            QMessageBox.information(self, "No Dataset",
+                                    "Add table.txt files in the File Manager first.")
             return
 
         try:
@@ -354,29 +442,49 @@ class SpinWaveModeProfileTab(QWidget):
                                 "dt, t start, and t end must be numbers.")
             return
 
-        component = COMPONENT_MAP[self._comp_combo.currentText()]
+        component  = COMPONENT_MAP[self._comp_combo.currentText()]
+        cache      = fft_cache_path(sim_dir, component, dt, t_start, t_end)
+        has_cache  = cache.exists()
+
+        # Raw data is only required when we actually have to compute
+        if self._raw_data is None and not (use_cache and has_cache):
+            QMessageBox.information(
+                self, "No Data",
+                "Load a dataset first.\n"
+                "(No matching FFT cache file was found for these parameters.)"
+            )
+            return
+
         self._fft_btn.setEnabled(False)
-        self._status_lbl.setText("Computing FFT …")
+        self._fft_force_btn.setEnabled(False)
+        self._status_lbl.setText(
+            "Loading FFT from cache …" if (use_cache and has_cache)
+            else "Computing FFT …"
+        )
 
         self._fft_worker = _FFTWorker(
-            self._raw_data, component, dt, t_start, t_end, self
+            self._raw_data, component, dt, t_start, t_end,
+            sim_dir=str(sim_dir), use_cache=use_cache, parent=self,
         )
         self._fft_worker.finished.connect(self._on_fft_done)
         self._fft_worker.error.connect(self._on_fft_error)
         self._fft_worker.start()
 
-    def _on_fft_done(self, result: dict) -> None:
+    def _on_fft_done(self, result: dict, source: str) -> None:
         self._fft_result = result
+        self._peaks = []            # old peaks refer to the previous FFT
         self._fft_btn.setEnabled(True)
+        self._fft_force_btn.setEnabled(True)
         n_freq = len(result["f"])
         self._status_lbl.setText(
-            f"FFT done  –  {n_freq} frequency points  "
+            f"FFT done ({source})  –  {n_freq} frequency points  "
             f"({result['f'][-1]/1e9:.1f} GHz max)"
         )
         self._plot_spectrum()
 
     def _on_fft_error(self, msg: str) -> None:
         self._fft_btn.setEnabled(True)
+        self._fft_force_btn.setEnabled(True)
         self._status_lbl.setText("FFT failed.")
         QMessageBox.critical(self, "FFT Error", msg)
 

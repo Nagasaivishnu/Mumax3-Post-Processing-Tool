@@ -199,6 +199,90 @@ def compute_fft(
 
 
 # ---------------------------------------------------------------------------
+# FFT result caching
+# ---------------------------------------------------------------------------
+#
+# After compute_fft, the result can be saved to an .npz file in the simulation
+# directory.  The filename encodes the FFT identification parameters
+# (component, dt, time window), so each distinct parameter set gets its own
+# cache file:
+#
+#     fft_My_dt5e-12_ts3e-09_te2.5e-08.npz
+#
+# On the next "Compute FFT" with the same parameters, the cache is loaded
+# instead of recomputing (unless the user forces a recompute).
+
+FFT_CACHE_PREFIX = "fft"
+
+# Reverse of COMPONENT_MAP: axis index → name
+_COMPONENT_NAMES = {v: k for k, v in COMPONENT_MAP.items()}
+
+
+def fft_cache_path(
+    sim_dir: str | Path,
+    component: int,
+    dt: float,
+    t_start: float,
+    t_end: float,
+) -> Path:
+    """
+    Build the cache-file path for one FFT parameter set.
+
+    The name encodes component, dt, and the time window so that different
+    parameter combinations never collide.
+    """
+    comp_name = _COMPONENT_NAMES.get(component, f"c{component}")
+    fname = (
+        f"{FFT_CACHE_PREFIX}_{comp_name}"
+        f"_dt{dt:g}_ts{t_start:g}_te{t_end:g}.npz"
+    )
+    return Path(sim_dir) / fname
+
+
+def save_fft_result(
+    sim_dir: str | Path,
+    component: int,
+    dt: float,
+    t_start: float,
+    t_end: float,
+    result: dict,
+) -> Path:
+    """
+    Save a compute_fft result dict to the simulation directory.
+
+    Returns the path of the written .npz file.
+    """
+    path = fft_cache_path(sim_dir, component, dt, t_start, t_end)
+    np.savez(path, f=result["f"], P=result["P"], P_int=result["P_int"])
+    logger.info("Saved FFT cache → %s", path)
+    return path
+
+
+def load_fft_result(path: str | Path) -> dict:
+    """
+    Load a previously saved FFT result.
+
+    Returns the same dict structure as compute_fft:
+    {'f', 'P', 'P_int'}.
+
+    Raises
+    ------
+    ValueError  if the file does not contain the expected arrays.
+    """
+    path = Path(path)
+    with np.load(path) as data:
+        missing = [k for k in ("f", "P", "P_int") if k not in data.files]
+        if missing:
+            raise ValueError(
+                f"FFT cache '{path.name}' is missing arrays: {missing}. "
+                "Delete the file and recompute."
+            )
+        result = {"f": data["f"], "P": data["P"], "P_int": data["P_int"]}
+    logger.info("Loaded FFT cache ← %s", path)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Peak detection
 # ---------------------------------------------------------------------------
 
