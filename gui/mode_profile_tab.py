@@ -31,9 +31,12 @@ from gui.plot_canvas import PlotCanvas
 from gui.plot_style import style_axis
 from processing.mode_profile import (
     load_dataset, compute_fft, find_fmr_peaks, get_spatial_profile,
-    fft_cache_path, save_fft_result, load_fft_result,
+    apply_orientation, fft_cache_path, save_fft_result, load_fft_result,
     COMPONENT_MAP, AVG_AXIS_MAP, AVG_TO_VIEW,
 )
+
+# Orientation combo labels → clockwise degrees
+ROTATION_MAP = {"0°": 0, "90° CW": 90, "180°": 180, "270° CW": 270}
 
 logger = logging.getLogger(__name__)
 
@@ -308,6 +311,22 @@ class SpinWaveModeProfileTab(QWidget):
         self._scale_combo = QComboBox()
         self._scale_combo.addItems(["Log10", "Linear"])
         vis_form.addRow("Scale:", self._scale_combo)
+
+        # Orientation — applied to both the popups AND the PPT export
+        self._rot_combo = QComboBox()
+        self._rot_combo.addItems(list(ROTATION_MAP.keys()))
+        self._rot_combo.setToolTip("Clockwise rotation applied before display/export")
+        self._rot_combo.setCurrentText("270° CW")
+        vis_form.addRow("Rotate:", self._rot_combo)
+
+        flip_row = QHBoxLayout()
+        self._flip_h_chk = QCheckBox("Flip H")
+        self._flip_h_chk.setToolTip("Mirror left-right")
+        self._flip_v_chk = QCheckBox("Flip V")
+        self._flip_v_chk.setToolTip("Mirror up-down")
+        flip_row.addWidget(self._flip_h_chk)
+        flip_row.addWidget(self._flip_v_chk)
+        vis_form.addRow("Flip:", flip_row)
 
         self._auto_range_chk = QCheckBox("Auto range")
         self._auto_range_chk.setChecked(True)
@@ -652,6 +671,7 @@ class SpinWaveModeProfileTab(QWidget):
             sp2d = get_spatial_profile(
                 self._fft_result["P"], pk["pk_idx"], avg_axis
             )
+            sp2d = apply_orientation(sp2d, *self._current_orientation())
 
             popup = ModeProfilePopup(
                 sp2d       = sp2d,
@@ -665,6 +685,18 @@ class SpinWaveModeProfileTab(QWidget):
                 parent     = self,
             )
             popup.show()
+
+    # ------------------------------------------------------------------
+    # Orientation helper
+    # ------------------------------------------------------------------
+
+    def _current_orientation(self) -> tuple[int, bool, bool]:
+        """Return (rotation_cw_deg, flip_h, flip_v) from the Visualisation controls."""
+        return (
+            ROTATION_MAP.get(self._rot_combo.currentText(), 0),
+            self._flip_h_chk.isChecked(),
+            self._flip_v_chk.isChecked(),
+        )
 
     # ------------------------------------------------------------------
     # PowerPoint export
@@ -740,6 +772,7 @@ class SpinWaveModeProfileTab(QWidget):
                 sp2d = get_spatial_profile(
                     self._fft_result["P"], pk["pk_idx"], avg_axis
                 )
+                sp2d = apply_orientation(sp2d, *self._current_orientation())
                 fig = Figure(figsize=(5, 4), tight_layout=True)
                 ax  = fig.add_subplot(111)
                 draw_mode_profile(fig, ax, sp2d, pk["mode"], pk["f_peak"],
@@ -877,7 +910,8 @@ class ModeProfilePopup(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self._sp2d      = sp2d
+        self._sp2d      = sp2d          # original, never modified
+        self._view      = sp2d          # current (rotated/flipped) array
         self._mode_num  = mode_num
         self._f_peak_hz = f_peak_hz
         self._avg_axis  = avg_axis
@@ -935,11 +969,51 @@ class ModeProfilePopup(QDialog):
         refresh_btn.clicked.connect(self._on_refresh)
         ctrl.addWidget(refresh_btn)
 
+        # ── orientation row (rotate / flip) ───────────────────────────
+        orient = QHBoxLayout()
+        layout.addLayout(orient)
+        orient.addWidget(QLabel("Orient:"))
+
+        for text, tip, slot in [
+            ("↺ Rot CCW", "Rotate 90° counter-clockwise", self._rotate_ccw),
+            ("↻ Rot CW",  "Rotate 90° clockwise",         self._rotate_cw),
+            ("Flip H",         "Flip horizontally (left-right)", self._flip_h),
+            ("Flip V",         "Flip vertically (up-down)",      self._flip_v),
+            ("Reset",          "Restore original orientation",   self._reset_orient),
+        ]:
+            btn = QPushButton(text)
+            btn.setToolTip(tip)
+            btn.clicked.connect(slot)
+            orient.addWidget(btn)
+        orient.addStretch()
+
+    # ── orientation handlers ──────────────────────────────────────────
+
+    def _rotate_ccw(self) -> None:
+        self._view = np.rot90(self._view, k=1)
+        self._on_refresh()
+
+    def _rotate_cw(self) -> None:
+        self._view = np.rot90(self._view, k=-1)
+        self._on_refresh()
+
+    def _flip_h(self) -> None:
+        self._view = np.fliplr(self._view)
+        self._on_refresh()
+
+    def _flip_v(self) -> None:
+        self._view = np.flipud(self._view)
+        self._on_refresh()
+
+    def _reset_orient(self) -> None:
+        self._view = self._sp2d
+        self._on_refresh()
+
     def _draw(self, cmap, scale, vmin, vmax) -> None:
         ax = self._canvas.single_ax
         self._canvas.clear_axes()
         draw_mode_profile(
-            self._canvas.fig, ax, self._sp2d,
+            self._canvas.fig, ax, self._view,
             self._mode_num, self._f_peak_hz, self._avg_axis,
             cmap, scale, vmin, vmax,
         )

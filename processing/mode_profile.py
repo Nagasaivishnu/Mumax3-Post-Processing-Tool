@@ -372,3 +372,32 @@ def get_spatial_profile(
         return sp.mean(axis=2)      # (nz, ny)  → YZ view
     else:                           # "None" – central z slice
         return sp[sp.shape[0] // 2] # (ny, nx)  → XY view
+
+
+def apply_orientation(
+    arr: np.ndarray,
+    rotation_cw_deg: int = 0,
+    flip_h: bool = False,
+    flip_v: bool = False,
+) -> np.ndarray:
+    """
+    Rotate then flip a 2-D array for display / export.
+
+    Order of operations: rotate first, then horizontal flip, then vertical.
+
+    Parameters
+    ----------
+    rotation_cw_deg : clockwise rotation, one of 0, 90, 180, 270
+    flip_h          : mirror left-right   (np.fliplr)
+    flip_v          : mirror up-down      (np.flipud)
+    """
+    out = arr
+    # np.rot90 rotates counter-clockwise; convert clockwise degrees to k.
+    k = {0: 0, 90: -1, 180: 2, 270: 1}.get(int(rotation_cw_deg) % 360, 0)
+    if k:
+        out = np.rot90(out, k=k)
+    if flip_h:
+        out = np.fliplr(out)
+    if flip_v:
+        out = np.flipud(out)
+    return out
