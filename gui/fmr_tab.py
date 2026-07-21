@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.plot_canvas import PlotCanvas
+from gui.plot_style import style_axis
 from processing.fmr import calc_susceptibility, get_absorption_curve, get_mfft_at_field
 from export.csv_export import export_dataframe, build_heatmap_dataframe, build_slice_dataframe
 import pandas as pd
@@ -325,7 +326,10 @@ class _HeatmapSubTab(QWidget):
             ax.set_xlabel("Magnetic Field (T)", fontsize=11)
             ax.set_ylabel("Frequency (GHz)", fontsize=11)
             ax.set_title(label, fontsize=12)
-            canvas.fig.colorbar(im, ax=ax, label="|χ| (arb. units)")
+            # Origin style: box + inward ticks (no minor locators on an image)
+            style_axis(ax, minor=False)
+            cbar = canvas.fig.colorbar(im, ax=ax, label="|χ| (arb. units)")
+            cbar.ax.tick_params(direction="in")
             canvas.draw()
 
     def _do_export(self):
@@ -440,6 +444,7 @@ class _BaseSliceTab(QWidget):
         ax.legend(frameon=False, fontsize=10)
         if self._log_chk.isChecked():
             ax.set_yscale("log")
+        style_axis(ax)   # publication ("Origin") styling
         self._canvas.draw()
 
         self._last_export_data = (x_plot, y_sets, x_label)

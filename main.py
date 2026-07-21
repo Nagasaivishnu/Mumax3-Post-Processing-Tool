@@ -20,10 +20,14 @@ logging.basicConfig(
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 
+from gui.plot_style import set_origin_rcparams
 from gui.main_window import MainWindow
 
 
 def main() -> None:
+    # Publication ("Origin") plot style for all Matplotlib figures
+    set_origin_rcparams()
+
     # High-DPI support
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

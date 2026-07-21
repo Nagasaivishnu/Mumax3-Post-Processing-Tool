@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.plot_canvas import PlotCanvas
+from gui.plot_style import style_axis
 from processing.mode_profile import (
     load_dataset, compute_fft, find_fmr_peaks, get_spatial_profile,
     fft_cache_path, save_fft_result, load_fft_result,
@@ -582,10 +583,7 @@ class SpinWaveModeProfileTab(QWidget):
         ax.plot(f_ghz[mask], P_int[mask], color="black", linewidth=1.5)
         ax.set_xlabel("Frequency (GHz)", fontsize=12)
         ax.set_ylabel("Integrated Power (arb. units)", fontsize=12)
-        ax.tick_params(direction="in", which="both", top=True, right=True,
-                       length=5, width=1)
-        for sp in ax.spines.values():
-            sp.set_linewidth(1.2)
+        style_axis(ax)   # publication ("Origin") styling
 
         # Overlay peak markers
         if with_peaks and self._peaks:

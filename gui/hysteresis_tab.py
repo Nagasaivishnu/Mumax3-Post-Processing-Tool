@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
 )
 
 from gui.plot_canvas import PlotCanvas
+from gui.plot_style import style_axis
 from processing.hysteresis import extract_xy, merge_datasets
 from export.csv_export import export_dataframe
 
@@ -230,9 +231,11 @@ class HysteresisTab(QWidget):
         if self._chk_legend.isChecked():
             ax.legend(frameon=False, fontsize=10)
 
-        if self._chk_ticks.isChecked():
-            ax.tick_params(direction="in", which="both",
-                           top=True, right=True, length=5)
+        # Publication ("Origin") styling: full box, inward major+minor ticks.
+        # The "Inward ticks" checkbox toggles the all-sides tick marks.
+        style_axis(ax)
+        if not self._chk_ticks.isChecked():
+            ax.tick_params(which="both", top=False, right=False)
 
         self._canvas.draw()
 
