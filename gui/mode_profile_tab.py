@@ -227,7 +227,7 @@ class SpinWaveModeProfileTab(QWidget):
         self._comp_combo.setCurrentText("My")
         proc_form.addRow("Component:", self._comp_combo)
 
-        self._dt_edit = QLineEdit("5e-12")
+        self._dt_edit = QLineEdit("10e-12")
         self._dt_edit.setPlaceholderText("e.g. 5e-12")
         self._dt_edit.setToolTip("Saving interval [s] – scientific notation OK")
         proc_form.addRow("dt (s):", self._dt_edit)
@@ -324,6 +324,7 @@ class SpinWaveModeProfileTab(QWidget):
         self._flip_h_chk.setToolTip("Mirror left-right")
         self._flip_v_chk = QCheckBox("Flip V")
         self._flip_v_chk.setToolTip("Mirror up-down")
+        self._flip_v_chk.setChecked(True)
         flip_row.addWidget(self._flip_h_chk)
         flip_row.addWidget(self._flip_v_chk)
         vis_form.addRow("Flip:", flip_row)
@@ -851,8 +852,6 @@ def draw_mode_profile(
     vmax:  float | None = None,
 ) -> None:
     """Render one 2-D spatial mode profile onto (fig, ax)."""
-    view_label = AVG_TO_VIEW.get(avg_axis, "XY")
-
     if scale == "Log10":
         eps = sp2d[sp2d > 0].min() * 1e-3 if (sp2d > 0).any() else 1e-30
         Z   = np.log10(np.maximum(sp2d, eps))
@@ -870,16 +869,11 @@ def draw_mode_profile(
         vmin=vmin_plot, vmax=vmax_plot,
     )
     ax.set_title(
-        f"Mode {mode_num}  –  {f_peak_hz/1e9:.4f} GHz\n"
-        f"Avg: {avg_axis}  →  {view_label} plane",
+        f"Mode {mode_num}  –  {f_peak_hz/1e9:.4f} GHz",
         fontsize=11,
     )
     ax.set_xticks([])
     ax.set_yticks([])
-
-    x_lbl, y_lbl = list(view_label)
-    ax.set_xlabel(x_lbl, fontsize=10)
-    ax.set_ylabel(y_lbl, fontsize=10)
 
     scale_lbl = r"$\log_{10}$(Power)" if scale == "Log10" else "Power"
     cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
