@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QComboBox, QPushButton, QCheckBox, QLabel, QGroupBox,
@@ -138,6 +138,7 @@ class SpinWaveModeProfileTab(QWidget):
     def __init__(self, file_manager, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._fm = file_manager
+        self._settings = QSettings("MuMax3Tool", "ModeProfileTab")
 
         # ── runtime state ─────────────────────────────────────────────
         self._raw_data: np.ndarray | None = None   # (n_time, nz, ny, nx, 3)
@@ -324,6 +325,37 @@ class SpinWaveModeProfileTab(QWidget):
         vis_form.addRow("", self._show_btn)
 
         ctrl.addWidget(vis_grp)
+
+        # 6 ─ PowerPoint export ────────────────────────────────────────
+        ppt_grp    = QGroupBox("Export to PowerPoint")
+        ppt_layout = QVBoxLayout(ppt_grp)
+
+        path_row = QHBoxLayout()
+        self._ppt_path_edit = QLineEdit(self._settings.value("ppt_path", ""))
+        self._ppt_path_edit.setPlaceholderText("presentation.pptx")
+        self._ppt_path_edit.setToolTip(
+            "Target .pptx file. Created if it does not exist;\n"
+            "otherwise a new slide is appended at the end."
+        )
+        path_row.addWidget(self._ppt_path_edit)
+
+        ppt_browse_btn = QPushButton("…")
+        ppt_browse_btn.setMaximumWidth(30)
+        ppt_browse_btn.setToolTip("Browse for the target .pptx file")
+        ppt_browse_btn.clicked.connect(self._browse_ppt)
+        path_row.addWidget(ppt_browse_btn)
+        ppt_layout.addLayout(path_row)
+
+        self._ppt_save_btn = QPushButton("Save FFT + Modes to PPT")
+        self._ppt_save_btn.setToolTip(
+            "Appends one slide at the end of the selected .pptx containing\n"
+            "the current FMR spectrum and the spatial profiles of the\n"
+            "modes listed in the Modes field."
+        )
+        self._ppt_save_btn.clicked.connect(self._do_save_ppt)
+        ppt_layout.addWidget(self._ppt_save_btn)
+
+        ctrl.addWidget(ppt_grp)
         ctrl.addStretch()
 
         # ── RIGHT: FMR spectrum plot ───────────────────────────────────
@@ -637,6 +669,127 @@ class SpinWaveModeProfileTab(QWidget):
             popup.show()
 
     # ------------------------------------------------------------------
+    # PowerPoint export
+    # ------------------------------------------------------------------
+
+    def _browse_ppt(self) -> None:
+        start = self._ppt_path_edit.text().strip()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Select PowerPoint file", start,
+            "PowerPoint (*.pptx)",
+            options=QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if path:
+            self._ppt_path_edit.setText(path)
+
+    def _do_save_ppt(self) -> None:
+        if self._fft_result is None:
+            QMessageBox.information(self, "No FFT",
+                                    "Compute FFT first — nothing to save.")
+            return
+
+        path_txt = self._ppt_path_edit.text().strip()
+        if not path_txt:
+            QMessageBox.warning(self, "No PPT File",
+                                "Enter or browse the target .pptx file first.")
+            return
+        ppt_path = Path(path_txt)
+        if ppt_path.suffix.lower() != ".pptx":
+            ppt_path = ppt_path.with_suffix(".pptx")
+        self._settings.setValue("ppt_path", str(ppt_path))
+
+        import tempfile
+        from matplotlib.figure import Figure
+
+        tmpdir = Path(tempfile.mkdtemp(prefix="mumax_ppt_"))
+        images: list[str] = []
+
+        # 1 ─ FFT spectrum (current right-panel plot, incl. peak markers)
+        spec_png = tmpdir / "fmr_spectrum.png"
+        self._canvas.fig.savefig(spec_png, dpi=150, bbox_inches="tight")
+        images.append(str(spec_png))
+
+        # 2 ─ spatial mode profiles (modes listed in the Modes field)
+        n_modes = 0
+        if self._peaks:
+            try:
+                requested = [
+                    int(x.strip())
+                    for x in self._modes_edit.text().split(",")
+                    if x.strip()
+                ]
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Input",
+                                    "Modes must be comma-separated integers, e.g. 1,2,4")
+                return
+
+            peak_map = {p["mode"]: p for p in self._peaks}
+            avg_axis = self._avg_combo.currentText()
+            cmap     = self._cmap_combo.currentText()
+            scale    = self._scale_combo.currentText()
+            auto     = self._auto_range_chk.isChecked()
+            try:
+                vmin = float(self._vmin_edit.text()) if not auto else None
+                vmax = float(self._vmax_edit.text()) if not auto else None
+            except ValueError:
+                vmin = vmax = None
+
+            for mode_num in requested:
+                pk = peak_map.get(mode_num)
+                if pk is None:
+                    logger.warning("PPT export: mode %d not detected, skipped", mode_num)
+                    continue
+                sp2d = get_spatial_profile(
+                    self._fft_result["P"], pk["pk_idx"], avg_axis
+                )
+                fig = Figure(figsize=(5, 4), tight_layout=True)
+                ax  = fig.add_subplot(111)
+                draw_mode_profile(fig, ax, sp2d, pk["mode"], pk["f_peak"],
+                                  avg_axis, cmap, scale, vmin, vmax)
+                png = tmpdir / f"mode_{mode_num}.png"
+                fig.savefig(png, dpi=150)
+                images.append(str(png))
+                n_modes += 1
+
+        entry = self._current_entry()
+        label = entry.label if entry is not None else "dataset"
+        title = (
+            f"{label} — FMR spectrum"
+            + (f" + {n_modes} mode profile{'s' if n_modes != 1 else ''}"
+               if n_modes else "")
+            + f"  ({self._comp_combo.currentText()}, dt={self._dt_edit.text()} s, "
+              f"window {self._tstart_edit.text()}–{self._tend_edit.text()} s)"
+        )
+
+        try:
+            from export.ppt_export import append_images_slide
+            append_images_slide(ppt_path, images, title)
+        except ImportError:
+            QMessageBox.critical(
+                self, "Missing Dependency",
+                "python-pptx is not installed.\n\n"
+                "Install it with:\n    pip install python-pptx"
+            )
+            return
+        except PermissionError:
+            QMessageBox.critical(
+                self, "PPT Export Error",
+                f"Cannot write to:\n{ppt_path}\n\n"
+                "The file is probably open in PowerPoint — close it and "
+                "try again."
+            )
+            return
+        except Exception as exc:
+            QMessageBox.critical(self, "PPT Export Error", str(exc))
+            return
+
+        QMessageBox.information(
+            self, "Saved to PPT",
+            f"Appended 1 slide with {len(images)} image"
+            f"{'s' if len(images) != 1 else ''} to:\n{ppt_path}"
+        )
+
+    # ------------------------------------------------------------------
     # Small helpers
     # ------------------------------------------------------------------
 
@@ -648,6 +801,59 @@ class SpinWaveModeProfileTab(QWidget):
     def _on_auto_range_toggled(self, checked: bool) -> None:
         self._vmin_edit.setEnabled(not checked)
         self._vmax_edit.setEnabled(not checked)
+
+
+# ---------------------------------------------------------------------------
+# Shared mode-profile drawing (used by the popup AND the PPT export)
+# ---------------------------------------------------------------------------
+
+def draw_mode_profile(
+    fig,
+    ax,
+    sp2d: np.ndarray,
+    mode_num: int,
+    f_peak_hz: float,
+    avg_axis: str,
+    cmap:  str = "inferno",
+    scale: str = "Log10",
+    vmin:  float | None = None,
+    vmax:  float | None = None,
+) -> None:
+    """Render one 2-D spatial mode profile onto (fig, ax)."""
+    view_label = AVG_TO_VIEW.get(avg_axis, "XY")
+
+    if scale == "Log10":
+        eps = sp2d[sp2d > 0].min() * 1e-3 if (sp2d > 0).any() else 1e-30
+        Z   = np.log10(np.maximum(sp2d, eps))
+    else:
+        Z = sp2d
+
+    if vmin is None or vmax is None:
+        vmin_plot = float(Z.min())
+        vmax_plot = float(Z.max())
+    else:
+        vmin_plot, vmax_plot = float(vmin), float(vmax)
+
+    im = ax.imshow(
+        Z, origin="lower", cmap=cmap, aspect="equal",
+        vmin=vmin_plot, vmax=vmax_plot,
+    )
+    ax.set_title(
+        f"Mode {mode_num}  –  {f_peak_hz/1e9:.4f} GHz\n"
+        f"Avg: {avg_axis}  →  {view_label} plane",
+        fontsize=11,
+    )
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    x_lbl, y_lbl = list(view_label)
+    ax.set_xlabel(x_lbl, fontsize=10)
+    ax.set_ylabel(y_lbl, fontsize=10)
+
+    scale_lbl = r"$\log_{10}$(Power)" if scale == "Log10" else "Power"
+    cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
+    cbar.set_label(scale_lbl, fontsize=9)
+    cbar.ax.tick_params(labelsize=8)
 
 
 # ---------------------------------------------------------------------------
@@ -732,49 +938,13 @@ class ModeProfilePopup(QDialog):
         ctrl.addWidget(refresh_btn)
 
     def _draw(self, cmap, scale, vmin, vmax) -> None:
-        import matplotlib.colors as mcolors
-
         ax = self._canvas.single_ax
         self._canvas.clear_axes()
-
-        sp = self._sp2d
-        view_label = AVG_TO_VIEW.get(self._avg_axis, "XY")
-
-        if scale == "Log10":
-            eps = sp[sp > 0].min() * 1e-3 if (sp > 0).any() else 1e-30
-            Z   = np.log10(np.maximum(sp, eps))
-        else:
-            Z = sp
-
-        # Colour limits
-        if vmin is None or vmax is None:
-            vmin_plot = float(Z.min())
-            vmax_plot = float(Z.max())
-        else:
-            vmin_plot, vmax_plot = float(vmin), float(vmax)
-
-        im = ax.imshow(
-            Z, origin="lower", cmap=cmap, aspect="equal",
-            vmin=vmin_plot, vmax=vmax_plot,
+        draw_mode_profile(
+            self._canvas.fig, ax, self._sp2d,
+            self._mode_num, self._f_peak_hz, self._avg_axis,
+            cmap, scale, vmin, vmax,
         )
-        ax.set_title(
-            f"Mode {self._mode_num}  –  {self._f_peak_hz/1e9:.4f} GHz\n"
-            f"Avg: {self._avg_axis}  →  {view_label} plane",
-            fontsize=11,
-        )
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-        # Axis labels based on view plane
-        x_lbl, y_lbl = list(view_label)
-        ax.set_xlabel(x_lbl, fontsize=10)
-        ax.set_ylabel(y_lbl, fontsize=10)
-
-        scale_lbl = r"$\log_{10}$(Power)" if scale == "Log10" else "Power"
-        cbar = self._canvas.fig.colorbar(im, ax=ax, fraction=0.045, pad=0.02)
-        cbar.set_label(scale_lbl, fontsize=9)
-        cbar.ax.tick_params(labelsize=8)
-
         self._canvas.draw()
 
     def _on_refresh(self) -> None:
