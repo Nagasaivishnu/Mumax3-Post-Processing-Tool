@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 
 import numpy as np
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QComboBox, QPushButton, QCheckBox, QLabel, QGroupBox,
@@ -27,6 +27,75 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 COLORMAPS = ["jet", "inferno", "plasma", "viridis", "hot", "gray", "RdBu_r"]
+
+
+# ---------------------------------------------------------------------------
+# Shared heatmap renderer  (used by the on-screen view AND the PPT export)
+# ---------------------------------------------------------------------------
+
+def render_heatmap(
+    fig,
+    ax,
+    label: str,
+    fields: np.ndarray,
+    f: np.ndarray,
+    mFFTs: np.ndarray,
+    cmap: str,
+    log_scale: bool,
+    auto_range: bool,
+    vmin: float,
+    vmax: float,
+    freq_max_ghz: float,
+    freq_min_ghz: float = 2.0,
+) -> None:
+    """
+    Draw one |χ(f, B)| heatmap onto (fig, ax) in publication ("Origin") style.
+
+    Colour limits
+    -------------
+    auto_range=True   → limits taken from the data (log: min-positive…max).
+    auto_range=False  → vmin/vmax are ABSOLUTE |χ| values.
+    """
+    import matplotlib.colors as mcolors
+
+    f_ghz  = f * 1e-9
+    f_mask = (f_ghz >= freq_min_ghz) & (f_ghz <= freq_max_ghz)
+    f_plot = f_ghz[f_mask]
+    Z      = np.abs(mFFTs[f_mask, :])
+
+    Zmax = float(Z.max()) if Z.size else 1.0
+
+    # ── resolve colour limits ──────────────────────────────────────────
+    if auto_range:
+        if log_scale:
+            pos  = Z[Z > 0]
+            vmin = float(pos.min()) if pos.size else Zmax * 1e-3
+            vmax = Zmax
+        else:
+            vmin = vmax = None      # let imshow autoscale
+    else:
+        # absolute values as entered by the user
+        if log_scale and (vmin is None or vmin <= 0):
+            vmin = (vmax if vmax else Zmax) * 1e-3
+
+    norm = None
+    imshow_kw = {}
+    if log_scale:
+        norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
+    else:
+        imshow_kw = {"vmin": vmin, "vmax": vmax}
+
+    extent = [fields[0], fields[-1], f_plot[0], f_plot[-1]]
+    im = ax.imshow(
+        Z, aspect="auto", origin="lower", extent=extent,
+        cmap=cmap, norm=norm, **imshow_kw,
+    )
+    ax.set_xlabel("Magnetic Field (T)", fontsize=11)
+    ax.set_ylabel("Frequency (GHz)", fontsize=11)
+    ax.set_title(label, fontsize=12)
+    style_axis(ax, minor=False)          # Origin box + inward ticks
+    cbar = fig.colorbar(im, ax=ax, label="|χ| (arb. units)")
+    cbar.ax.tick_params(direction="in")
 
 
 # ---------------------------------------------------------------------------
@@ -139,19 +208,26 @@ class FMRTab(QWidget):
         self._log_chk.setChecked(True)
         disp_form.addRow("", self._log_chk)
 
-        self._vmin_spin = QDoubleSpinBox()
-        self._vmin_spin.setRange(1e-10, 1.0)
-        self._vmin_spin.setDecimals(10)
-        self._vmin_spin.setValue(1e-3)
-        self._vmin_spin.setToolTip("Relative vmin as fraction of max")
-        disp_form.addRow("vmin (frac.):", self._vmin_spin)
+        self._auto_range_chk = QCheckBox("Auto range")
+        self._auto_range_chk.setChecked(True)
+        self._auto_range_chk.setToolTip(
+            "Take the colour limits from the data.\n"
+            "Uncheck to set vmin/vmax manually (as a fraction of the max)."
+        )
+        self._auto_range_chk.toggled.connect(self._on_auto_range_toggled)
+        disp_form.addRow("", self._auto_range_chk)
 
-        self._vmax_spin = QDoubleSpinBox()
-        self._vmax_spin.setRange(1e-10, 1.0)
-        self._vmax_spin.setDecimals(10)
-        self._vmax_spin.setValue(1e-1)
-        self._vmax_spin.setToolTip("Relative vmax as fraction of max")
-        disp_form.addRow("vmax (frac.):", self._vmax_spin)
+        self._vmin_edit = QLineEdit("1e-3")
+        self._vmin_edit.setToolTip("Absolute vmin for |χ| (scientific notation OK, e.g. 1e-3)")
+        disp_form.addRow("vmin:", self._vmin_edit)
+
+        self._vmax_edit = QLineEdit("1e-1")
+        self._vmax_edit.setToolTip("Absolute vmax for |χ| (scientific notation OK, e.g. 1e-1)")
+        disp_form.addRow("vmax:", self._vmax_edit)
+
+        # start disabled — Auto range is on by default
+        self._vmin_edit.setEnabled(False)
+        self._vmax_edit.setEnabled(False)
 
         self._freq_max_spin = QDoubleSpinBox()
         self._freq_max_spin.setRange(0.1, 1000.0)
@@ -244,15 +320,33 @@ class FMRTab(QWidget):
         self._freq_slice_tab.load_results(results)
         self._field_slice_tab.load_results(results)
 
+    def _on_auto_range_toggled(self, checked: bool) -> None:
+        self._vmin_edit.setEnabled(not checked)
+        self._vmax_edit.setEnabled(not checked)
+
     def _refresh_heatmaps(self) -> None:
         if not self._results:
             return
+        auto = self._auto_range_chk.isChecked()
+        vmin = vmax = None
+        if not auto:
+            try:
+                vmin = float(self._vmin_edit.text())
+                vmax = float(self._vmax_edit.text())
+            except ValueError:
+                QMessageBox.warning(
+                    self, "Invalid Range",
+                    "vmin and vmax must be numbers (e.g. 1e-3). "
+                    "Falling back to Auto range."
+                )
+                auto = True
         self._heatmap_tab.plot_heatmaps(
             self._results,
             cmap        = self._cmap_combo.currentText(),
             log_scale   = self._log_chk.isChecked(),
-            vmin_frac   = self._vmin_spin.value(),
-            vmax_frac   = self._vmax_spin.value(),
+            auto_range  = auto,
+            vmin        = vmin,
+            vmax        = vmax,
             freq_max_ghz= self._freq_max_spin.value(),
         )
 
@@ -270,6 +364,7 @@ class _HeatmapSubTab(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._settings = QSettings("MuMax3Tool", "FMRHeatmap")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -282,6 +377,25 @@ class _HeatmapSubTab(QWidget):
         self._c_layout  = QVBoxLayout(self._container)
         self._scroll.setWidget(self._container)
 
+        # ── PowerPoint export row ─────────────────────────────────────
+        ppt_row = QHBoxLayout()
+        ppt_row.addWidget(QLabel("PPT:"))
+        self._ppt_path_edit = QLineEdit(self._settings.value("ppt_path", ""))
+        self._ppt_path_edit.setPlaceholderText("presentation.pptx")
+        self._ppt_path_edit.setToolTip(
+            "Target .pptx file. A new slide with the heatmap image(s) —\n"
+            "resized and restyled in Origin style — is appended at the end."
+        )
+        ppt_row.addWidget(self._ppt_path_edit)
+        ppt_browse = QPushButton("…")
+        ppt_browse.setMaximumWidth(30)
+        ppt_browse.clicked.connect(self._browse_ppt)
+        ppt_row.addWidget(ppt_browse)
+        self._ppt_btn = QPushButton("Save Heatmaps to PPT")
+        self._ppt_btn.clicked.connect(self._do_save_ppt)
+        ppt_row.addWidget(self._ppt_btn)
+        layout.addLayout(ppt_row)
+
         # Export button
         self._export_btn = QPushButton("Export All Heatmap Data (CSV)…")
         self._export_btn.clicked.connect(self._do_export)
@@ -289,10 +403,15 @@ class _HeatmapSubTab(QWidget):
 
         self._canvases: list[PlotCanvas] = []
         self._last_results = []
+        self._last_params: dict = {}
 
-    def plot_heatmaps(self, results, cmap, log_scale, vmin_frac, vmax_frac, freq_max_ghz):
+    def plot_heatmaps(self, results, cmap, log_scale, auto_range,
+                      vmin, vmax, freq_max_ghz):
         self._last_results = results
-        import matplotlib.colors as mcolors
+        self._last_params = dict(
+            cmap=cmap, log_scale=log_scale, auto_range=auto_range,
+            vmin=vmin, vmax=vmax, freq_max_ghz=freq_max_ghz,
+        )
 
         # clear previous
         for c in self._canvases:
@@ -302,35 +421,89 @@ class _HeatmapSubTab(QWidget):
 
         for label, fields, f, mFFTs in results:
             canvas = PlotCanvas(self._container, n_rows=1, n_cols=1, figsize=(8, 4))
-            ax = canvas.single_ax
             self._c_layout.addWidget(canvas)
             self._canvases.append(canvas)
-
-            # Frequency mask
-            f_ghz   = f * 1e-9
-            f_mask  = (f_ghz >= 2) & (f_ghz <= freq_max_ghz)
-            f_plot  = f_ghz[f_mask]
-            Z       = np.abs(mFFTs[f_mask, :])
-
-            norm = None
-            if log_scale:
-                vmax = vmax_frac
-                vmin = vmin_frac #vmax * vmin_frac if vmax > 0 else 1e-30
-                norm = mcolors.LogNorm(vmin=vmin, vmax=vmax)
-
-            extent = [fields[0], fields[-1], f_plot[0], f_plot[-1]]
-            im = ax.imshow(
-                Z, aspect="auto", origin="lower", extent=extent,
-                cmap=cmap, norm=norm,
+            render_heatmap(
+                canvas.fig, canvas.single_ax, label, fields, f, mFFTs,
+                cmap=cmap, log_scale=log_scale, auto_range=auto_range,
+                vmin=vmin, vmax=vmax, freq_max_ghz=freq_max_ghz,
             )
-            ax.set_xlabel("Magnetic Field (T)", fontsize=11)
-            ax.set_ylabel("Frequency (GHz)", fontsize=11)
-            ax.set_title(label, fontsize=12)
-            # Origin style: box + inward ticks (no minor locators on an image)
-            style_axis(ax, minor=False)
-            cbar = canvas.fig.colorbar(im, ax=ax, label="|χ| (arb. units)")
-            cbar.ax.tick_params(direction="in")
             canvas.draw()
+
+    # ── PowerPoint export ─────────────────────────────────────────────
+
+    def _browse_ppt(self):
+        start = self._ppt_path_edit.text().strip()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Select PowerPoint file", start, "PowerPoint (*.pptx)",
+            options=QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if path:
+            self._ppt_path_edit.setText(path)
+
+    def _do_save_ppt(self):
+        if not self._last_results:
+            QMessageBox.information(self, "Nothing to export",
+                                    "Run FMR processing first.")
+            return
+        path_txt = self._ppt_path_edit.text().strip()
+        if not path_txt:
+            QMessageBox.warning(self, "No PPT File",
+                                "Enter or browse the target .pptx file first.")
+            return
+        from pathlib import Path
+        ppt_path = Path(path_txt)
+        if ppt_path.suffix.lower() != ".pptx":
+            ppt_path = ppt_path.with_suffix(".pptx")
+        self._settings.setValue("ppt_path", str(ppt_path))
+
+        import tempfile
+        from matplotlib.figure import Figure
+
+        p = self._last_params
+        tmpdir = Path(tempfile.mkdtemp(prefix="mumax_fmr_ppt_"))
+        images = []
+        for i, (label, fields, f, mFFTs) in enumerate(self._last_results):
+            # Fresh figure at a fixed publication size, Origin-styled.
+            fig = Figure(figsize=(6.5, 4.0), dpi=300, tight_layout=True)
+            ax  = fig.add_subplot(111)
+            render_heatmap(
+                fig, ax, label, fields, f, mFFTs,
+                cmap=p["cmap"], log_scale=p["log_scale"],
+                auto_range=p["auto_range"], vmin=p["vmin"],
+                vmax=p["vmax"], freq_max_ghz=p["freq_max_ghz"],
+            )
+            png = tmpdir / f"heatmap_{i}.png"
+            fig.savefig(png)
+            images.append(str(png))
+
+        title = f"FMR heatmaps — {len(images)} dataset" \
+                f"{'s' if len(images) != 1 else ''}"
+        try:
+            from export.ppt_export import append_images_slide
+            append_images_slide(ppt_path, images, title)
+        except ImportError:
+            QMessageBox.critical(
+                self, "Missing Dependency",
+                "python-pptx is not installed.\n\nInstall it with:\n"
+                "    pip install python-pptx"
+            )
+            return
+        except PermissionError:
+            QMessageBox.critical(
+                self, "PPT Export Error",
+                f"Cannot write to:\n{ppt_path}\n\n"
+                "The file is probably open in PowerPoint — close it and try again."
+            )
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "PPT Export Error", str(e))
+            return
+        QMessageBox.information(
+            self, "Saved to PPT",
+            f"Appended 1 slide with {len(images)} heatmap"
+            f"{'s' if len(images) != 1 else ''} to:\n{ppt_path}"
+        )
 
     def _do_export(self):
         if not self._last_results:

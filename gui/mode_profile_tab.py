@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QComboBox, QPushButton, QCheckBox, QLabel, QGroupBox,
     QFileDialog, QMessageBox, QSplitter, QLineEdit,
-    QProgressBar, QSpinBox, QDialog, QScrollArea,
+    QProgressBar, QSpinBox, QDialog, QScrollArea, QSizePolicy,
 )
 
 from gui.plot_canvas import PlotCanvas
@@ -167,8 +167,10 @@ class SpinWaveModeProfileTab(QWidget):
         # ── LEFT: scroll-able control panel ───────────────────────────
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(270)
-        scroll.setMaximumWidth(290)
+        scroll.setMinimumWidth(240)
+        # No max width — let the splitter size it freely (stretchable).
+        # Never show a horizontal scrollbar; content wraps to the width.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         ctrl_widget = QWidget()
         ctrl = QVBoxLayout(ctrl_widget)
@@ -214,6 +216,11 @@ class SpinWaveModeProfileTab(QWidget):
         self._status_lbl = QLabel("No data loaded.")
         self._status_lbl.setWordWrap(True)
         self._status_lbl.setStyleSheet("color: gray; font-size: 11px;")
+        # Don't let long status text force the panel wider — wrap in height
+        # instead of dictating the panel's minimum width.
+        self._status_lbl.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum
+        )
         load_layout.addWidget(self._status_lbl)
 
         ctrl.addWidget(load_grp)
