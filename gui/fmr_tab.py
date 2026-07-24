@@ -261,11 +261,11 @@ class FMRTab(QWidget):
         right_tabs.addTab(self._heatmap_tab, "Heatmap")
 
         # -- Fixed-frequency slice tab --
-        self._freq_slice_tab = _FreqSliceTab(self)
+        self._freq_slice_tab = _FreqSliceTab(owner=self)
         right_tabs.addTab(self._freq_slice_tab, "Slice: Fixed Frequency")
 
         # -- Fixed-field slice tab --
-        self._field_slice_tab = _FieldSliceTab(self)
+        self._field_slice_tab = _FieldSliceTab(owner=self)
         right_tabs.addTab(self._field_slice_tab, "Slice: Fixed Field")
 
     # ------------------------------------------------------------------
@@ -541,9 +541,11 @@ class _BaseSliceTab(QWidget):
 
     _val_unit: str = ""           # displayed next to the input, e.g. "GHz" or "T"
     _val_default: float = 5.0
+    _limit_by_freq: bool = False  # if True, clip the x-axis to the Max freq setting
 
-    def __init__(self, parent=None):
+    def __init__(self, owner=None, parent=None):
         super().__init__(parent)
+        self._owner = owner             # the FMRTab (for the Max freq setting)
         self._results: list = []
         self._last_export_data = None   # (x_array, [(y, label), …], x_label)
 
@@ -605,10 +607,22 @@ class _BaseSliceTab(QWidget):
         y_sets = []
         x_plot = None
 
+        # Optional upper limit on the frequency axis (from the Max freq setting)
+        freq_max = None
+        if self._limit_by_freq and self._owner is not None:
+            try:
+                freq_max = float(self._owner._freq_max_spin.value())
+            except Exception:
+                freq_max = None
+
         for i, (label, fields, f, mFFTs) in enumerate(self._results):
             x_plot, y, x_label, y_label = self._compute_slice(
                 fields, f, mFFTs, val
             )
+            if freq_max is not None:
+                mask   = x_plot <= freq_max
+                x_plot = x_plot[mask]
+                y      = y[mask]
             ax.plot(x_plot, y, label=label, color=cmap(i % 10))
             y_sets.append((y, label))
 
@@ -675,6 +689,7 @@ class _FieldSliceTab(_BaseSliceTab):
     """
     _val_unit    = "T"
     _val_default = 0.05
+    _limit_by_freq = True        # follow the Max freq setting on the x-axis
 
     def _compute_slice(self, fields, f, mFFTs, val):
         x, y    = get_mfft_at_field(fields, mFFTs, f, Bstat=val)
