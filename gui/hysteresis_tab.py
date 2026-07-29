@@ -7,18 +7,22 @@ Plotting and export for MuMax3 hysteresis table.txt data.
 from __future__ import annotations
 import logging
 
+from pathlib import Path
+
 import numpy as np
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QComboBox, QPushButton, QCheckBox, QLabel, QGroupBox,
     QFileDialog, QMessageBox, QSplitter, QDoubleSpinBox,
-    QSpinBox,
+    QSpinBox, QProgressBar,
 )
 
 from gui.plot_canvas import PlotCanvas
 from gui.plot_style import style_axis
 from processing.hysteresis import extract_xy, merge_datasets
+from processing.ovf_video import make_video, video_cache_path, find_ovf_frames
 from export.csv_export import export_dataframe
 
 logger = logging.getLogger(__name__)
@@ -27,6 +31,30 @@ logger = logging.getLogger(__name__)
 LINE_STYLES = ["-", "--", "-.", ":", "None"]
 MARKERS     = ["None", "o", "s", "^", "v", "D", "x", "+"]
 COLORMAPS   = ["tab10", "Dark2", "Set1", "Set2"]
+
+
+class _VideoWorker(QThread):
+    """Builds an OVF → MP4 movie in a background thread."""
+    progress = pyqtSignal(int, int)   # done, total
+    status   = pyqtSignal(str)
+    finished = pyqtSignal(str)        # video path
+    error    = pyqtSignal(str)
+
+    def __init__(self, sim_dir: str, fps: int, parent=None) -> None:
+        super().__init__(parent)
+        self.sim_dir = sim_dir
+        self.fps     = fps
+
+    def run(self) -> None:
+        try:
+            path = make_video(
+                self.sim_dir, fps=self.fps,
+                progress_cb=lambda d, t: self.progress.emit(d, t),
+                status_cb=lambda m: self.status.emit(m),
+            )
+            self.finished.emit(str(path))
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
 class HysteresisTab(QWidget):
@@ -119,6 +147,71 @@ class HysteresisTab(QWidget):
         lbl_form.addRow("Y label:", self._ylabel_edit)
         ctrl_layout.addWidget(lbl_grp)
 
+        # X-axis range (manual override)
+        xr_grp  = QGroupBox("X-axis Range")
+        xr_form = QFormLayout(xr_grp)
+        self._xauto_chk = QCheckBox("Auto range")
+        self._xauto_chk.setChecked(True)
+        self._xauto_chk.toggled.connect(self._on_xauto_toggled)
+        xr_form.addRow("", self._xauto_chk)
+        self._xmin_edit = QLineEdit()
+        self._xmax_edit = QLineEdit()
+        self._xmin_edit.setPlaceholderText("min")
+        self._xmax_edit.setPlaceholderText("max")
+        self._xmin_edit.setToolTip("Lower X limit (scientific notation OK, e.g. -0.05)")
+        self._xmax_edit.setToolTip("Upper X limit (scientific notation OK, e.g. 0.05)")
+        self._xmin_edit.setEnabled(False)
+        self._xmax_edit.setEnabled(False)
+        xr_form.addRow("X min:", self._xmin_edit)
+        xr_form.addRow("X max:", self._xmax_edit)
+        ctrl_layout.addWidget(xr_grp)
+
+        # ── OVF movie ─────────────────────────────────────────────────
+        vid_grp    = QGroupBox("OVF Movie")
+        vid_layout = QVBoxLayout(vid_grp)
+
+        vid_form = QFormLayout()
+        self._vid_ds_combo = QComboBox()
+        self._vid_ds_combo.setToolTip(
+            "Dataset whose directory holds the numbered OVF frames\n"
+            "(0000.ovf, 0001.ovf, …)."
+        )
+        vid_form.addRow("Source:", self._vid_ds_combo)
+
+        self._vid_fps_spin = QSpinBox()
+        self._vid_fps_spin.setRange(1, 60)
+        self._vid_fps_spin.setValue(10)
+        self._vid_fps_spin.setSuffix(" fps")
+        vid_form.addRow("Frame rate:", self._vid_fps_spin)
+        vid_layout.addLayout(vid_form)
+
+        self._vid_rebuild_chk = QCheckBox("Rebuild (ignore cached video)")
+        self._vid_rebuild_chk.setToolTip(
+            "Regenerate the movie even if ovf_movie.mp4 already exists."
+        )
+        vid_layout.addWidget(self._vid_rebuild_chk)
+
+        self._vid_btn = QPushButton("Create / View Video")
+        self._vid_btn.setToolTip(
+            "Convert the numbered OVF frames to an MP4 (via mumax3-convert)\n"
+            "and open it. The video is cached, so next time it opens directly."
+        )
+        self._vid_btn.clicked.connect(self._do_video)
+        vid_layout.addWidget(self._vid_btn)
+
+        self._vid_progress = QProgressBar()
+        self._vid_progress.setVisible(False)
+        vid_layout.addWidget(self._vid_progress)
+
+        self._vid_status = QLabel("")
+        self._vid_status.setWordWrap(True)
+        self._vid_status.setStyleSheet("color: gray; font-size: 11px;")
+        vid_layout.addWidget(self._vid_status)
+
+        ctrl_layout.addWidget(vid_grp)
+
+        self._vid_worker = None
+
         ctrl_layout.addStretch()
 
         # Action buttons
@@ -144,6 +237,7 @@ class HysteresisTab(QWidget):
     def _refresh_columns(self) -> None:
         """Repopulate x/y dropdowns from the first loaded file's columns."""
         entries = self._fm.entries
+        self._refresh_video_datasets()
         if not entries:
             self._x_combo.clear()
             self._y_combo.clear()
@@ -237,7 +331,107 @@ class HysteresisTab(QWidget):
         if not self._chk_ticks.isChecked():
             ax.tick_params(which="both", top=False, right=False)
 
+        # Manual X-axis range
+        if not self._xauto_chk.isChecked():
+            self._apply_xlim(ax)
+
         self._canvas.draw()
+
+    def _on_xauto_toggled(self, checked: bool) -> None:
+        self._xmin_edit.setEnabled(not checked)
+        self._xmax_edit.setEnabled(not checked)
+
+    def _apply_xlim(self, ax) -> None:
+        """Set the X limits from the min/max fields; blanks keep the auto edge."""
+        lo_txt = self._xmin_edit.text().strip()
+        hi_txt = self._xmax_edit.text().strip()
+        cur_lo, cur_hi = ax.get_xlim()
+        try:
+            lo = float(lo_txt) if lo_txt else cur_lo
+            hi = float(hi_txt) if hi_txt else cur_hi
+        except ValueError:
+            QMessageBox.warning(self, "Invalid X Range",
+                                "X min and X max must be numbers (e.g. -0.05).")
+            return
+        if lo == hi:
+            return
+        ax.set_xlim(lo, hi)
+
+    # ------------------------------------------------------------------
+    # OVF movie
+    # ------------------------------------------------------------------
+
+    def _refresh_video_datasets(self) -> None:
+        prev = self._vid_ds_combo.currentText()
+        self._vid_ds_combo.blockSignals(True)
+        self._vid_ds_combo.clear()
+        for entry in self._fm.entries:
+            self._vid_ds_combo.addItem(entry.label, userData=entry)
+        idx = self._vid_ds_combo.findText(prev)
+        if idx >= 0:
+            self._vid_ds_combo.setCurrentIndex(idx)
+        self._vid_ds_combo.blockSignals(False)
+
+    def _video_sim_dir(self) -> Path | None:
+        entry = self._vid_ds_combo.currentData()
+        if entry is None:
+            return None
+        return Path(entry.path).parent
+
+    def _open_video(self, path: str) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _do_video(self) -> None:
+        sim_dir = self._video_sim_dir()
+        if sim_dir is None:
+            QMessageBox.information(self, "No Dataset",
+                                    "Add table.txt files first, then pick a source.")
+            return
+
+        cache = video_cache_path(sim_dir)
+
+        # ── cached video → just open it ──────────────────────────────
+        if cache.exists() and not self._vid_rebuild_chk.isChecked():
+            self._vid_status.setText(f"Opening cached {cache.name} …")
+            self._open_video(str(cache))
+            return
+
+        # ── otherwise build it (needs OVF frames) ────────────────────
+        if not find_ovf_frames(sim_dir):
+            QMessageBox.information(
+                self, "No OVF Frames",
+                "No numbered OVF frames (0000.ovf, 0001.ovf, …) were found in:\n"
+                f"{sim_dir}"
+            )
+            return
+
+        self._vid_btn.setEnabled(False)
+        self._vid_progress.setVisible(True)
+        self._vid_progress.setValue(0)
+        self._vid_status.setText("Starting …")
+
+        self._vid_worker = _VideoWorker(str(sim_dir), self._vid_fps_spin.value(), self)
+        self._vid_worker.progress.connect(self._on_video_progress)
+        self._vid_worker.status.connect(self._vid_status.setText)
+        self._vid_worker.finished.connect(self._on_video_done)
+        self._vid_worker.error.connect(self._on_video_error)
+        self._vid_worker.start()
+
+    def _on_video_progress(self, done: int, total: int) -> None:
+        self._vid_progress.setMaximum(total)
+        self._vid_progress.setValue(done)
+
+    def _on_video_done(self, path: str) -> None:
+        self._vid_btn.setEnabled(True)
+        self._vid_progress.setVisible(False)
+        self._vid_status.setText(f"Saved {Path(path).name} — opening …")
+        self._open_video(path)
+
+    def _on_video_error(self, msg: str) -> None:
+        self._vid_btn.setEnabled(True)
+        self._vid_progress.setVisible(False)
+        self._vid_status.setText("Video failed.")
+        QMessageBox.critical(self, "Video Error", msg)
 
     def _do_export(self) -> None:
         if self._last_merge_df is None or self._last_merge_df.empty:
