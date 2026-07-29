@@ -32,7 +32,7 @@ from gui.plot_style import style_axis
 from processing.mode_profile import (
     load_dataset, compute_fft, find_fmr_peaks, get_spatial_profile,
     apply_orientation, fft_cache_path, save_fft_result, load_fft_result,
-    COMPONENT_MAP, AVG_AXIS_MAP, AVG_TO_VIEW,
+    COMPONENT_ORDER, AVG_AXIS_MAP, AVG_TO_VIEW,
 )
 
 # Orientation combo labels → clockwise degrees
@@ -230,8 +230,13 @@ class SpinWaveModeProfileTab(QWidget):
         proc_form = QFormLayout(proc_grp)
 
         self._comp_combo = QComboBox()
-        self._comp_combo.addItems(["Mx", "My", "Mz"])
+        self._comp_combo.addItems(COMPONENT_ORDER)
         self._comp_combo.setCurrentText("My")
+        self._comp_combo.setToolTip(
+            "Magnetisation component to analyse.\n"
+            "M45  = (Mx + My)/√2   (in-plane, 45°)\n"
+            "M135 = (My − Mx)/√2   (in-plane, 135°)"
+        )
         proc_form.addRow("Component:", self._comp_combo)
 
         self._dt_edit = QLineEdit("10e-12")
@@ -429,7 +434,7 @@ class SpinWaveModeProfileTab(QWidget):
             t_end   = float(self._tend_edit.text())
         except ValueError:
             return None
-        component = COMPONENT_MAP[self._comp_combo.currentText()]
+        component = self._comp_combo.currentText()
         return fft_cache_path(sim_dir, component, dt, t_start, t_end)
 
     def _do_load(self) -> None:
@@ -502,7 +507,7 @@ class SpinWaveModeProfileTab(QWidget):
                                 "dt, t start, and t end must be numbers.")
             return
 
-        component  = COMPONENT_MAP[self._comp_combo.currentText()]
+        component  = self._comp_combo.currentText()
         cache      = fft_cache_path(sim_dir, component, dt, t_start, t_end)
         has_cache  = cache.exists()
 

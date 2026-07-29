@@ -42,6 +42,46 @@ logger = logging.getLogger(__name__)
 # Mapping: user-facing component name → array axis-4 index
 COMPONENT_MAP = {"Mx": 0, "My": 1, "Mz": 2}
 
+# In-plane projected components: name → (cx, cy, cz) coefficients so the
+# scalar field is  cx*Mx + cy*My + cz*Mz.
+#   M45  = magnetisation along  45° in-plane  = (Mx + My)/√2
+#   M135 = magnetisation along 135° in-plane  = (My − Mx)/√2
+_S2 = 1.0 / np.sqrt(2.0)
+COMPONENT_PROJECTIONS = {
+    "M45":  (_S2,  _S2, 0.0),
+    "M135": (-_S2, _S2, 0.0),
+}
+
+# Order shown in the Component dropdown
+COMPONENT_ORDER = ["Mx", "My", "Mz", "M45", "M135"]
+
+
+def extract_component(m_raw: np.ndarray, component: str) -> np.ndarray:
+    """
+    Return the scalar field (n_time, nz, ny, nx) for a component name.
+
+    *component* is one of COMPONENT_MAP (axis component) or
+    COMPONENT_PROJECTIONS (in-plane projection).
+    """
+    if component in COMPONENT_MAP:
+        return m_raw[:, :, :, :, COMPONENT_MAP[component]].astype(np.float32)
+
+    if component in COMPONENT_PROJECTIONS:
+        cx, cy, cz = COMPONENT_PROJECTIONS[component]
+        out = np.zeros(m_raw.shape[:4], dtype=np.float32)
+        if cx:
+            out += cx * m_raw[:, :, :, :, 0]
+        if cy:
+            out += cy * m_raw[:, :, :, :, 1]
+        if cz:
+            out += cz * m_raw[:, :, :, :, 2]
+        return out
+
+    raise KeyError(
+        f"Unknown component '{component}'. "
+        f"Expected one of {COMPONENT_ORDER}."
+    )
+
 # Averaging direction → which spatial axis to reduce
 AVG_AXIS_MAP = {"Z": 0, "Y": 1, "X": 2}   # axes of the (nz, ny, nx) sub-array
 
@@ -141,7 +181,7 @@ def load_dataset(
 
 def compute_fft(
     m_raw: np.ndarray,
-    component: int,
+    component: str,
     dt: float,
     t_start: float,
     t_end: float,
@@ -152,7 +192,8 @@ def compute_fft(
     Parameters
     ----------
     m_raw     : (n_time, nz, ny, nx, 3)
-    component : 0=Mx, 1=My, 2=Mz
+    component : component name — 'Mx' | 'My' | 'Mz' | 'M45' | 'M135'
+                (M45, M135 are in-plane projections; see extract_component)
     dt        : simulation saving interval [s]
     t_start   : start of analysis window [s]
     t_end     : end   of analysis window [s]
@@ -165,7 +206,7 @@ def compute_fft(
         'P_int' : spatially integrated power shape (n_freq,)
     """
     # Select component → (n_time, nz, ny, nx)
-    m_t = m_raw[:, :, :, :, component].astype(np.float32)
+    m_t = extract_component(m_raw, component)
 
     # Apply time window
     n_time = m_t.shape[0]
@@ -214,13 +255,10 @@ def compute_fft(
 
 FFT_CACHE_PREFIX = "fft"
 
-# Reverse of COMPONENT_MAP: axis index → name
-_COMPONENT_NAMES = {v: k for k, v in COMPONENT_MAP.items()}
-
 
 def fft_cache_path(
     sim_dir: str | Path,
-    component: int,
+    component: str,
     dt: float,
     t_start: float,
     t_end: float,
@@ -231,7 +269,7 @@ def fft_cache_path(
     The name encodes component, dt, and the time window so that different
     parameter combinations never collide.
     """
-    comp_name = _COMPONENT_NAMES.get(component, f"c{component}")
+    comp_name = str(component)
     fname = (
         f"{FFT_CACHE_PREFIX}_{comp_name}"
         f"_dt{dt:g}_ts{t_start:g}_te{t_end:g}.npz"
@@ -241,7 +279,7 @@ def fft_cache_path(
 
 def save_fft_result(
     sim_dir: str | Path,
-    component: int,
+    component: str,
     dt: float,
     t_start: float,
     t_end: float,
