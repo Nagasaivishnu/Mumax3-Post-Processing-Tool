@@ -112,7 +112,7 @@ def make_video(
     for chunk in _chunks(frames, _CONVERT_CHUNK):
         try:
             subprocess.run(
-                [exe, "-png", *[str(p) for p in chunk]],
+                [exe, "-png", "-arrows", "10", *[str(p) for p in chunk]],
                 check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
         except subprocess.CalledProcessError as exc:

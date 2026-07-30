@@ -548,6 +548,8 @@ class _BaseSliceTab(QWidget):
         self._owner = owner             # the FMRTab (for the Max freq setting)
         self._results: list = []
         self._last_export_data = None   # (x_array, [(y, label), …], x_label)
+        self._last_curves = None        # ([(x, y, label), …], x_label, y_label)
+        self._settings = QSettings("MuMax3Tool", f"FMRSlice_{type(self).__name__}")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -566,6 +568,23 @@ class _BaseSliceTab(QWidget):
         self._log_chk = QCheckBox("Log Y scale")
         ctrl_form.addRow("", self._log_chk)
 
+        # Y-axis range (manual override)
+        self._yauto_chk = QCheckBox("Auto Y range")
+        self._yauto_chk.setChecked(True)
+        self._yauto_chk.toggled.connect(self._on_yauto_toggled)
+        ctrl_form.addRow("", self._yauto_chk)
+
+        self._ymin_edit = QLineEdit()
+        self._ymax_edit = QLineEdit()
+        self._ymin_edit.setPlaceholderText("min")
+        self._ymax_edit.setPlaceholderText("max")
+        self._ymin_edit.setToolTip("Lower Y limit (scientific notation OK, e.g. 1e-3)")
+        self._ymax_edit.setToolTip("Upper Y limit (scientific notation OK, e.g. 1e2)")
+        self._ymin_edit.setEnabled(False)
+        self._ymax_edit.setEnabled(False)
+        ctrl_form.addRow("Y min:", self._ymin_edit)
+        ctrl_form.addRow("Y max:", self._ymax_edit)
+
         layout.addWidget(ctrl_grp)
 
         btn_row = QHBoxLayout()
@@ -576,6 +595,25 @@ class _BaseSliceTab(QWidget):
         btn_row.addWidget(self._plot_btn)
         btn_row.addWidget(self._export_btn)
         layout.addLayout(btn_row)
+
+        # PowerPoint export
+        ppt_row = QHBoxLayout()
+        ppt_row.addWidget(QLabel("PPT:"))
+        self._ppt_path_edit = QLineEdit(self._settings.value("ppt_path", ""))
+        self._ppt_path_edit.setPlaceholderText("presentation.pptx")
+        self._ppt_path_edit.setToolTip(
+            "Target .pptx file. The current slice is appended as a new "
+            "Origin-styled slide."
+        )
+        ppt_row.addWidget(self._ppt_path_edit)
+        ppt_browse = QPushButton("…")
+        ppt_browse.setMaximumWidth(30)
+        ppt_browse.clicked.connect(self._browse_ppt)
+        ppt_row.addWidget(ppt_browse)
+        self._ppt_btn = QPushButton("Save to PPT")
+        self._ppt_btn.clicked.connect(self._do_save_ppt)
+        ppt_row.addWidget(self._ppt_btn)
+        layout.addLayout(ppt_row)
 
         self._canvas = PlotCanvas(self, n_rows=1, n_cols=1, figsize=(8, 5))
         layout.addWidget(self._canvas)
@@ -599,14 +637,6 @@ class _BaseSliceTab(QWidget):
                                 f"Enter a number in {self._val_unit}.")
             return
 
-        ax = self._canvas.single_ax
-        self._canvas.clear_axes()
-
-        import matplotlib.cm as cm
-        cmap   = cm.get_cmap("tab10")
-        y_sets = []
-        x_plot = None
-
         # Optional upper limit on the frequency axis (from the Max freq setting)
         freq_max = None
         if self._limit_by_freq and self._owner is not None:
@@ -615,7 +645,9 @@ class _BaseSliceTab(QWidget):
             except Exception:
                 freq_max = None
 
-        for i, (label, fields, f, mFFTs) in enumerate(self._results):
+        curves, y_sets = [], []
+        x_plot = x_label = y_label = None
+        for (label, fields, f, mFFTs) in self._results:
             x_plot, y, x_label, y_label = self._compute_slice(
                 fields, f, mFFTs, val
             )
@@ -623,18 +655,119 @@ class _BaseSliceTab(QWidget):
                 mask   = x_plot <= freq_max
                 x_plot = x_plot[mask]
                 y      = y[mask]
-            ax.plot(x_plot, y, label=label, color=cmap(i % 10))
+            curves.append((x_plot, y, label))
             y_sets.append((y, label))
 
+        # Remember for redraw / export
+        self._last_curves = (curves, x_label, y_label)
+        self._last_export_data = (x_plot, y_sets, x_label)
+
+        ax = self._canvas.single_ax
+        self._canvas.clear_axes()
+        self._render_slice(ax, warn=True)
+        self._canvas.draw()
+
+    def _render_slice(self, ax, warn: bool = False) -> None:
+        """Draw the stored slice curves + Origin styling onto *ax*."""
+        if not self._last_curves:
+            return
+        import matplotlib.cm as cm
+        cmap = cm.get_cmap("tab10")
+        curves, x_label, y_label = self._last_curves
+        for i, (x, y, label) in enumerate(curves):
+            ax.plot(x, y, label=label, color=cmap(i % 10))
         ax.set_xlabel(x_label, fontsize=11)
         ax.set_ylabel(y_label, fontsize=11)
         ax.legend(frameon=False, fontsize=10)
         if self._log_chk.isChecked():
             ax.set_yscale("log")
         style_axis(ax)   # publication ("Origin") styling
-        self._canvas.draw()
+        if not self._yauto_chk.isChecked():
+            self._apply_ylim(ax, warn=warn)
 
-        self._last_export_data = (x_plot, y_sets, x_label)
+    def _on_yauto_toggled(self, checked: bool) -> None:
+        self._ymin_edit.setEnabled(not checked)
+        self._ymax_edit.setEnabled(not checked)
+
+    def _apply_ylim(self, ax, warn: bool = True) -> None:
+        """Set the Y limits from the min/max fields; blanks keep the auto edge."""
+        lo_txt = self._ymin_edit.text().strip()
+        hi_txt = self._ymax_edit.text().strip()
+        cur_lo, cur_hi = ax.get_ylim()
+        try:
+            lo = float(lo_txt) if lo_txt else cur_lo
+            hi = float(hi_txt) if hi_txt else cur_hi
+        except ValueError:
+            if warn:
+                QMessageBox.warning(self, "Invalid Y Range",
+                                    "Y min and Y max must be numbers (e.g. 1e-3).")
+            return
+        if lo == hi:
+            return
+        ax.set_ylim(lo, hi)
+
+    # ── PowerPoint export ─────────────────────────────────────────────
+
+    def _browse_ppt(self) -> None:
+        start = self._ppt_path_edit.text().strip()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Select PowerPoint file", start, "PowerPoint (*.pptx)",
+            options=QFileDialog.Option.DontConfirmOverwrite,
+        )
+        if path:
+            self._ppt_path_edit.setText(path)
+
+    def _do_save_ppt(self) -> None:
+        if not self._last_curves:
+            QMessageBox.information(self, "Nothing to save", "Plot a slice first.")
+            return
+        path_txt = self._ppt_path_edit.text().strip()
+        if not path_txt:
+            QMessageBox.warning(self, "No PPT File",
+                                "Enter or browse the target .pptx file first.")
+            return
+        from pathlib import Path
+        ppt_path = Path(path_txt)
+        if ppt_path.suffix.lower() != ".pptx":
+            ppt_path = ppt_path.with_suffix(".pptx")
+        self._settings.setValue("ppt_path", str(ppt_path))
+
+        import tempfile
+        from matplotlib.figure import Figure
+
+        # Re-render into a fresh publication ("Origin") figure.
+        fig = Figure(figsize=(7, 5), dpi=300, tight_layout=True)
+        ax  = fig.add_subplot(111)
+        self._render_slice(ax, warn=False)
+
+        tmpdir = Path(tempfile.mkdtemp(prefix="mumax_slice_ppt_"))
+        png = tmpdir / "slice.png"
+        fig.savefig(png)
+
+        _, _, y_label = self._last_curves
+        title = y_label or "FMR slice"
+        try:
+            from export.ppt_export import append_images_slide
+            append_images_slide(ppt_path, [str(png)], title)
+        except ImportError:
+            QMessageBox.critical(
+                self, "Missing Dependency",
+                "python-pptx is not installed.\n\nInstall it with:\n"
+                "    pip install python-pptx"
+            )
+            return
+        except PermissionError:
+            QMessageBox.critical(
+                self, "PPT Export Error",
+                f"Cannot write to:\n{ppt_path}\n\n"
+                "The file is probably open in PowerPoint — close it and try again."
+            )
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "PPT Export Error", str(e))
+            return
+        QMessageBox.information(self, "Saved to PPT",
+                                f"Appended 1 slide to:\n{ppt_path}")
 
     def _do_export(self) -> None:
         if self._last_export_data is None:
