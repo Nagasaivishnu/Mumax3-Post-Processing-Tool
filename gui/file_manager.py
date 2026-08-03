@@ -119,6 +119,7 @@ class FileManagerWidget(QWidget):
         btn_layout = QHBoxLayout()
         for text, slot in [
             ("Add Files", self._add_files),
+            ("Reload",    self._reload_selected),
             ("Remove",    self._remove_selected),
             ("Clear All", self._clear_all),
         ]:
@@ -169,6 +170,26 @@ class FileManagerWidget(QWidget):
             self._table.removeRow(row)
         if rows:
             self.datasets_changed.emit()
+
+    def _reload_selected(self) -> None:
+        """Re-read the selected table.txt files from disk (all if none selected)."""
+        rows = sorted({idx.row() for idx in self._table.selectedIndexes()})
+        targets = [self._entries[r] for r in rows] if rows else list(self._entries)
+        if not targets:
+            return
+
+        errors = []
+        for entry in targets:
+            entry.reload()            # drop cached DataFrame
+            try:
+                _ = entry.df          # force re-read now to surface errors
+            except LoadError as exc:
+                errors.append(str(exc))
+
+        self.datasets_changed.emit()  # tabs refresh from the reloaded data
+
+        if errors:
+            QMessageBox.warning(self, "Reload Errors", "\n".join(errors))
 
     def _clear_all(self) -> None:
         if not self._entries:
