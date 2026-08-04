@@ -11,7 +11,7 @@ import logging
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtWidgets import (
     QMainWindow, QSplitter, QTabWidget, QWidget,
-    QHBoxLayout, QStatusBar, QApplication,
+    QHBoxLayout, QStatusBar, QApplication, QDockWidget,
 )
 from PyQt6.QtGui import QKeySequence, QAction
 
@@ -19,6 +19,7 @@ from gui.file_manager import FileManagerWidget
 from gui.hysteresis_tab import HysteresisTab
 from gui.fmr_tab import FMRTab
 from gui.mode_profile_tab import SpinWaveModeProfileTab
+from gui.frame_viewer import FrameViewerWidget
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,14 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([280, 1020])
 
+        # ── OVF frame viewer (dockable, corner) ───────────────────────
+        self._frame_viewer = FrameViewerWidget(self._fm)
+        self._frame_dock = QDockWidget("OVF Frame Viewer", self)
+        self._frame_dock.setObjectName("FrameViewerDock")
+        self._frame_dock.setWidget(self._frame_viewer)
+        self._frame_dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._frame_dock)
+
         # Status bar
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready – add table.txt files to begin.")
@@ -94,11 +103,13 @@ class MainWindow(QMainWindow):
 
         # View menu
         view_menu = menu.addMenu("View")
-        for i, name in enumerate(["Hysteresis", "FMR"]):
+        for i, name in enumerate(["Hysteresis", "FMR", "Spin Wave Mode Profile"]):
             act = QAction(name, self)
             act.setShortcut(QKeySequence(f"Ctrl+{i+1}"))
             act.triggered.connect(lambda _, idx=i: self._tabs.setCurrentIndex(idx))
             view_menu.addAction(act)
+        view_menu.addSeparator()
+        view_menu.addAction(self._frame_dock.toggleViewAction())
 
         # Help menu
         help_menu = menu.addMenu("Help")

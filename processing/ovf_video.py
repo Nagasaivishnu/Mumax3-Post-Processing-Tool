@@ -58,6 +58,101 @@ def find_converter() -> str | None:
     return shutil.which("mumax3-convert") or shutil.which("mumax3-convert.exe")
 
 
+def find_muview() -> str | None:
+    """Locate a MuView executable on PATH, or None."""
+    for name in ("muview", "MuView", "muview.exe", "MuView.exe", "muview2"):
+        exe = shutil.which(name)
+        if exe:
+            return exe
+    return None
+
+
+def open_in_muview(ovf_path: str | Path, muview_exe: str | None = None) -> None:
+    """
+    Launch MuView on a single OVF file (non-blocking).
+
+    Raises RuntimeError if MuView cannot be located.
+    """
+    exe = muview_exe or find_muview()
+    if not exe:
+        raise RuntimeError(
+            "MuView was not found. Set its path in the viewer, or add it to PATH."
+        )
+    subprocess.Popen([exe, str(ovf_path)])
+
+
+# ---------------------------------------------------------------------------
+# Frame preparation (for the in-app viewer)
+# ---------------------------------------------------------------------------
+
+def ensure_frames(
+    sim_dir: str | Path,
+    progress_cb: Callable[[int, int], None] | None = None,
+    status_cb:   Callable[[str], None] | None = None,
+    convert_exe: str | None = None,
+    rebuild: bool = False,
+) -> list[dict]:
+    """
+    Ensure a PNG exists next to every numbered OVF frame, converting the
+    missing ones with ``mumax3-convert``.  PNGs are kept (cached) so the
+    frame viewer can re-open instantly.
+
+    Returns a list of ``{'index', 'ovf', 'png'}`` dicts in frame order.
+    """
+    sim_dir = Path(sim_dir)
+
+    def _status(msg: str) -> None:
+        logger.info(msg)
+        if status_cb:
+            status_cb(msg)
+
+    frames = find_ovf_frames(sim_dir)
+    if not frames:
+        raise FileNotFoundError(
+            "No numbered OVF frames (0000.ovf, 0001.ovf, …) found in:\n"
+            f"{sim_dir}"
+        )
+
+    pairs = [
+        {"index": int(_LEADING_NUM.match(o.name).group(1)),
+         "ovf": o, "png": o.with_suffix(".png")}
+        for o in frames
+    ]
+    todo = [p for p in pairs if rebuild or not p["png"].exists()]
+
+    if todo:
+        exe = convert_exe or find_converter()
+        if not exe:
+            raise RuntimeError(
+                "'mumax3-convert' was not found on your PATH.\n"
+                "It ships with MuMax3 — add the MuMax3 folder to PATH and retry."
+            )
+        _status(f"Converting {len(todo)} OVF files to PNG …")
+        done = 0
+        for chunk in _chunks([p["ovf"] for p in todo], _CONVERT_CHUNK):
+            try:
+                subprocess.run(
+                    [exe, "-png", "-arrows", "10", *[str(p) for p in chunk]],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+            except subprocess.CalledProcessError as exc:
+                err = exc.stderr.decode("utf-8", "replace") if exc.stderr else ""
+                raise RuntimeError(f"mumax3-convert failed:\n{err}") from exc
+            done += len(chunk)
+            if progress_cb:
+                progress_cb(done, len(todo))
+
+    missing = [p["png"].name for p in pairs if not p["png"].exists()]
+    if missing:
+        raise RuntimeError(
+            "Expected PNG output was not produced for: "
+            + ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
+        )
+
+    _status(f"{len(pairs)} frames ready.")
+    return pairs
+
+
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
