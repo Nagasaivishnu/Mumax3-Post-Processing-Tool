@@ -32,7 +32,13 @@ set -euo pipefail
 #  CONFIG -- edit these
 # =============================================================================
 SIM_DIR="$HOME/runs/sim.out"          # MuMax3 output dir (table.txt + m*.ovf)
-RESULT_DIR="$HOME/runs/results"       # where results are copied back to
+
+# Results are written to BOTH places:
+#   1. ${SIM_DIR}/${RESULTS_SUBDIR}   -- each simulation carries its own analysis
+#   2. ${RESULT_DIR}/<sim name>       -- one central tree to browse everything
+# Set RESULT_DIR="" to skip the central mirror and keep only the per-sim copy.
+RESULTS_SUBDIR="results"
+RESULT_DIR="$HOME/runs/results"
 
 COMPONENT="My"                        # Mx | My | Mz | M45 | M135
 DT="5e-12"                            # MuMax3 saving interval, seconds
@@ -53,15 +59,25 @@ source "${HERE}/config.sh"
 # shellcheck source=/dev/null
 source "${HERE}/logging.sh"
 
-mkdir -p "${RESULT_DIR}"
 log_init submit_modes "$@"
+
+SIM_DIR="${SIM_DIR%/}"
+SIM_NAME="$(basename "${SIM_DIR}")"
+# Computed from the real path, not the scratch copy cli.py will see.
+SIM_LABEL="$(sim_label "${SIM_DIR}")"
+SIM_RESULTS="${SIM_DIR}/${RESULTS_SUBDIR}"
+# Namespace the central mirror by simulation name, or 40 array tasks all
+# rsync into the same folder and silently overwrite each other.
+CENTRAL_RESULTS="${RESULT_DIR:+${RESULT_DIR}/${SIM_NAME}}"
 
 log_info "job id      : ${SLURM_JOB_ID:-none}"
 log_info "node        : $(hostname)"
 log_info "cpus        : ${SLURM_CPUS_PER_TASK:-?}"
 log_info "mem         : ${SLURM_MEM_PER_NODE:-?} MB"
 log_info "sim dir     : ${SIM_DIR}"
-log_info "result dir  : ${RESULT_DIR}"
+log_info "label       : ${SIM_LABEL}"
+log_info "results (1) : ${SIM_RESULTS}"
+log_info "results (2) : ${CENTRAL_RESULTS:-<central mirror disabled>}"
 log_info "parameters  : component=${COMPONENT} dt=${DT} window=[${T_START},${T_END}] avg=${AVG_AXIS}"
 
 config_check || true
@@ -91,8 +107,12 @@ trap cleanup EXIT
 trap 'log_error "SIGTERM: scancel or walltime limit"; exit 143' TERM
 trap 'log_error "SIGINT"; exit 130' INT
 
-log_cmd rsync -a "${SIM_DIR}/" "${SCRATCH}/sim.out/"
-log_info "staged size: $(du -sh "${SCRATCH}/sim.out" 2>/dev/null | cut -f1)"
+# Stage under the simulation's REAL name, not a hardcoded "sim.out". cli.py
+# names the bundle after the directory it analysed, so a hardcoded name would
+# make every job in a sweep produce an identically named .npz.
+STAGED="${SCRATCH}/${SIM_NAME}"
+log_cmd rsync -a "${SIM_DIR}/" "${STAGED}/"
+log_info "staged size: $(du -sh "${STAGED}" 2>/dev/null | cut -f1)"
 
 WORK_OUT="${SCRATCH}/results"
 mkdir -p "${WORK_OUT}"
@@ -109,7 +129,7 @@ export PROJECT_DIR PYTHON_MODULE VENV_DIR LOG_DIR
 set +e
 log_cmd "${CONTAINER_WRAPPER}" --exec bash "${HERE}/container_script.sh" \
     modes \
-    --sim-dir    "${SCRATCH}/sim.out" \
+    --sim-dir    "${STAGED}" \
     --outdir     "${WORK_OUT}" \
     --component  "${COMPONENT}" \
     --dt         "${DT}" \
@@ -120,27 +140,39 @@ log_cmd "${CONTAINER_WRAPPER}" --exec bash "${HERE}/container_script.sh" \
     --f-max      "${F_MAX}" \
     --avg-axis   "${AVG_AXIS}" \
     --workers    "${SLURM_CPUS_PER_TASK:-8}" \
+    --bundle-name "${SIM_LABEL}" \
     "${EXTRA_ARGS[@]}"
 STATUS=$?
 set -e
 
 # --- Copy results back BEFORE scratch is wiped -------------------------------
-log_cmd rsync -a "${WORK_OUT}/" "${RESULT_DIR}/" || true
+# Destination 1: the simulation's own results folder. This is the copy that
+# matters -- the analysis stays with the data that produced it.
+mkdir -p "${SIM_RESULTS}"
+log_cmd rsync -a "${WORK_OUT}/" "${SIM_RESULTS}/" || true
 
-# The .npz FFT cache and m_txyz.npy live next to the simulation data. Bring the
-# .npz back too -- the GUI on your laptop reads it and skips all recomputation.
-# (m_txyz.npy is deliberately NOT copied: it is huge and trivially rebuilt.)
+# The fft_*.npz cache is written next to the simulation data on scratch, not in
+# the results folder. Bring it back to the real simulation dir so a rerun with
+# different peak or orientation settings skips the whole FFT.
+# (m_txyz.npy is deliberately NOT copied: huge, and trivially rebuilt.)
 log_cmd rsync -a --include='fft_*.npz' --exclude='*' \
-      "${SCRATCH}/sim.out/" "${RESULT_DIR}/" || true
+      "${STAGED}/" "${SIM_DIR}/" || true
 
-# Keep a copy of this job's logs with the results, so the numbers and the
-# record of how they were produced travel together when you rsync them home.
-mkdir -p "${RESULT_DIR}/logs"
+# Keep this job's trace with the results, so the numbers and the record of how
+# they were produced travel together.
+mkdir -p "${SIM_RESULTS}/logs"
 [[ -n "${LOG_TRACE_FILE}" && -f "${LOG_TRACE_FILE}" ]] && \
-    cp "${LOG_TRACE_FILE}" "${RESULT_DIR}/logs/" 2>/dev/null || true
+    cp "${LOG_TRACE_FILE}" "${SIM_RESULTS}/logs/" 2>/dev/null || true
+
+# Destination 2: the central mirror, for browsing everything in one place.
+if [[ -n "${CENTRAL_RESULTS}" ]]; then
+    mkdir -p "${CENTRAL_RESULTS}"
+    log_cmd rsync -a "${SIM_RESULTS}/" "${CENTRAL_RESULTS}/" || true
+fi
 
 log_info "analysis exit status: ${STATUS}"
-log_info "results: ${RESULT_DIR}"
+log_info "results in simulation dir : ${SIM_RESULTS}"
+[[ -n "${CENTRAL_RESULTS}" ]] && log_info "results in central mirror : ${CENTRAL_RESULTS}"
 
 # Report what SLURM actually used, so you can right-size --mem next time.
 if command -v sacct >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then

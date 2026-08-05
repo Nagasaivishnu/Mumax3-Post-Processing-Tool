@@ -23,22 +23,45 @@ pip install -r requirements.txt
 # 1. How much memory will this need? (reads OVF headers only — instant)
 python3 cli.py probe --sim-dir ~/runs/sim.out
 
-# 2. Run the analysis
+# 2. Run the analysis. No --outdir needed: results go to
+#    ~/runs/sim.out/results/ automatically.
 python3 cli.py modes \
     --sim-dir ~/runs/sim.out \
-    --outdir  ~/runs/results \
     --component My --dt 5e-12 --t-start 3e-9 --t-end 25e-9 \
-    --n-peaks 5 --f-min 0 --f-max 40 \
-    --no-plots --no-csv
+    --n-peaks 5 --f-min 0 --f-max 40
 ```
+
+Every output lands in a `results/` folder **inside the simulation directory**,
+so the analysis always travels with the data that produced it:
+
+```
+~/runs/sweepA/sim.out/
+├── m000000.ovf …                     simulation data (untouched)
+├── table.txt
+├── fft_My_dt5e-12_….npz              FFT cache, reused on rerun
+└── results/
+    ├── sweepA_sim.out_My_modes.npz   ← download this
+    ├── My_spectrum.csv / .png
+    ├── My_peaks.csv
+    ├── My_mode1_9.375GHz_profile.png
+    └── logs/
+```
+
+Filenames are component-tagged, so analysing `My` then `Mz` into the same folder
+is safe. Pass `--outdir` to override the location, or `--results-subdir` to
+rename the folder.
 
 On your own PC:
 
 ```bash
-scp you@cluster:~/runs/results/sim.out_My_modes.npz .
+scp you@cluster:~/runs/sweepA/sim.out/results/sweepA_sim.out_My_modes.npz .
 pip install numpy matplotlib
-python plot_modes.py sim.out_My_modes.npz
+python plot_modes.py sweepA_sim.out_My_modes.npz
 ```
+
+Bundle names disambiguate automatically. MuMax3 calls every output directory
+`sim.out`, so the parent is prepended when the leaf name is generic — download a
+whole sweep into one folder and nothing collides.
 
 For running this under SLURM on the NUS CNNL cluster — container setup, batch
 scripts, job arrays, logging — see **[cluster/README_CLUSTER.md](cluster/README_CLUSTER.md)**.
@@ -92,6 +115,8 @@ whole power array), `both`, or `none`.
 
 Useful `modes` flags:
 
+- `--outdir` / `--results-subdir` — override where results go
+- `--bundle-name` — override the `.npz` filename stem
 - `--no-plots` — skip PNG rendering entirely (you're plotting at home)
 - `--no-csv` — skip per-mode CSVs (already in the `.npz`)
 - `--no-fft-cache` — don't write the large `fft_*.npz` next to the simulation
@@ -157,3 +182,20 @@ about which axes its profiles actually span.
 - Unequal dataset lengths in hysteresis export → outer join, NaN fill
 - Duplicate time points in FMR tables → deduplicated automatically
 - Datasets larger than RAM → `--mmap`
+
+
+---
+
+## Line endings
+
+`.gitattributes` forces LF on every `.sh`, `.slurm` and `.py` file. This is not
+cosmetic: you edit on Windows and run on Linux, and a script saved with CRLF
+fails on the cluster with
+
+```
+cluster/logs.sh: line 37: syntax error near unexpected token `$'in\r''
+/usr/bin/env: 'python3\r': No such file or directory
+```
+
+because the trailing `\r` becomes part of the command or the shebang path. If
+you ever see those errors, run `sed -i 's/\r$//' <file>` on the cluster.

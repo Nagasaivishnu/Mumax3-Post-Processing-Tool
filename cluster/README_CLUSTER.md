@@ -206,16 +206,33 @@ tail -f logs/mumax_modes_<JobID>.out
 The script stages the simulation to node-local scratch, runs the analysis inside
 the container, and rsyncs results back — including the `fft_*.npz` cache.
 
-### Step 3: bring results home and open them in the GUI
+### Step 3: where results land
+
+Results are written to **both** places:
+
+1. `<SIM_DIR>/results/` — inside the simulation itself. Each simulation carries
+   its own analysis, so nothing can be orphaned from the data that produced it,
+   and an array of 40 jobs cannot overwrite one another.
+2. `<RESULT_DIR>/<sim name>/` — a central mirror, for browsing everything in one
+   place. Set `RESULT_DIR=""` in the script to skip it.
+
+The `fft_*.npz` cache goes back beside the simulation data (not into `results/`),
+so a rerun with different peak or orientation settings skips the FFT entirely.
+`m_txyz.npy` is deliberately not copied back: huge, and trivially rebuilt.
+
+Bring the bundle home:
 
 ```bash
-rsync -az YOUR_ID@172.20.32.127:~/runs/results/ ./results/
+scp YOUR_ID@172.20.32.127:~/runs/sweepA/sim.out/results/*_modes.npz .
 ```
 
-Copy the `fft_*.npz` next to your local simulation directory. The GUI's
-"Compute FFT" finds it by name (`processing/mode_profile.fft_cache_path`) and
-loads it instantly — no recomputation. **This is the point of the whole setup:**
-the cluster does the FFT, your laptop does the interactive exploration.
+Filenames disambiguate themselves. MuMax3 names every output directory
+`sim.out`, so `sim_label()` in `config.sh` prepends the parent when the leaf name
+is generic — `sweepA/sim.out` becomes `sweepA_sim.out_My_modes.npz`. Download a
+whole sweep into one folder and nothing collides. `--bundle-name` overrides it.
+
+Outputs are also component-tagged (`My_spectrum.csv`, `Mz_spectrum.csv`), so
+analysing several components into the same `results/` folder is safe.
 
 ### Many simulations at once
 

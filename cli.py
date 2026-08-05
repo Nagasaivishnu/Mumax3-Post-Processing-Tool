@@ -237,6 +237,54 @@ def _outdir(path: str | Path) -> Path:
     return p
 
 
+# MuMax3 names its output directory after the .mx3 file, so a sweep is usually
+# sweepA/sim.out, sweepB/sim.out, ... -- the leaf name is identical everywhere.
+# Bundles named from the leaf alone would all be "sim.out_My_modes.npz" and
+# collide the moment you download several into one folder.
+_GENERIC_SIM_NAMES = {"sim.out", "output.out", "out", "sim", "output", "run.out"}
+
+
+def bundle_stem(sim_dir: Path, override: str | None = None) -> str:
+    """
+    A filename stem that stays unique across a parameter sweep.
+
+    Uses the simulation directory name, unless that name is a generic MuMax3
+    default -- in which case the parent directory (which is what actually
+    distinguishes the runs) is prepended.
+
+        ~/runs/sweepA/sim.out   ->  sweepA_sim.out
+        ~/runs/py_thickness.out ->  py_thickness.out
+
+    Mirrored by sim_label() in cluster/config.sh. The SLURM scripts must compute
+    this from the REAL simulation path and pass it as --bundle-name: they stage
+    data onto node-local scratch first, so cli.py only ever sees
+    /scratch/mumax_<jobid>/sim.out and would otherwise encode the job ID.
+    """
+    if override:
+        return override
+    name = sim_dir.name
+    if name.lower() in _GENERIC_SIM_NAMES and sim_dir.parent.name:
+        return f"{sim_dir.parent.name}_{name}"
+    return name
+
+
+def _resolve_outdir(args, base: Path) -> Path:
+    """
+    Decide where this run's outputs go.
+
+    Default is ``<base>/results`` -- a folder inside the simulation directory
+    itself, so every simulation carries its own analysis. That matters most for
+    job arrays: 40 simulations produce 40 self-contained result folders with no
+    chance of one overwriting another, and no central tree to keep in sync.
+
+    An explicit ``--outdir`` always wins, which is what the SLURM scripts use
+    when they redirect output to node-local scratch.
+    """
+    if getattr(args, "outdir", None):
+        return _outdir(args.outdir)
+    return _outdir(Path(base).expanduser().resolve() / args.results_subdir)
+
+
 def _cpus() -> int:
     """Cores available to this job -- SLURM-aware, falls back to the machine."""
     for var in ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
@@ -363,6 +411,7 @@ def save_download_bundle(
         "grid_shape":     list(grid_shape),
         "sim_dir":        str(sim_dir),
         "sim_name":       sim_dir.name,
+        "sim_label":      bundle_stem(sim_dir, getattr(args, "bundle_name", None)),
         "created_utc":    time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "slurm_job_id":   os.environ.get("SLURM_JOB_ID", ""),
         "host":           _hostname(),
@@ -432,8 +481,10 @@ def cmd_probe(args) -> int:
 
 def cmd_modes(args) -> int:
     _banner()
-    out = _outdir(args.outdir)
     sim_dir = Path(args.sim_dir).expanduser().resolve()
+    out = _resolve_outdir(args, sim_dir)
+    log.info("simulation : %s", sim_dir)
+    log.info("results    : %s", out)
     t0 = time.time()
 
     # ── 1. load ───────────────────────────────────────────────────────
@@ -476,11 +527,16 @@ def cmd_modes(args) -> int:
 
     make_plots = not args.no_plots
 
+    # Every output is component-tagged. All simulations now share one results
+    # folder per sim dir, so running --component My then --component Mz would
+    # otherwise silently overwrite the first run's spectrum and peaks.
+    tag0 = args.component
+
     # ── 3. integrated spectrum ────────────────────────────────────────
     export_dataframe(
         pd.DataFrame({"Frequency_Hz": f, "Frequency_GHz": f / 1e9,
                       "Integrated_Power": P_int}),
-        out / "spectrum.csv",
+        out / f"{tag0}_spectrum.csv",
     )
     if make_plots:
         fig, ax = plt.subplots(figsize=(6.0, 4.0))
@@ -490,7 +546,7 @@ def cmd_modes(args) -> int:
         ax.set_ylabel("Integrated FFT power (arb. u.)")
         ax.set_title(f"{args.component} spectrum - {sim_dir.name}")
         style_axis(ax)
-        _save_fig(fig, out / "spectrum.png", args.dpi)
+        _save_fig(fig, out / f"{tag0}_spectrum.png", args.dpi)
 
     # ── 4. peaks ──────────────────────────────────────────────────────
     peaks = mp.find_fmr_peaks(f, P_int, args.n_peaks, args.f_min, args.f_max)
@@ -500,7 +556,7 @@ def cmd_modes(args) -> int:
                        "f_peak_GHz": p["f_peak"] / 1e9,
                        "Integrated_Power": float(P_int[p["pk_idx"]])}
                       for p in peaks]),
-        out / "peaks.csv",
+        out / f"{tag0}_peaks.csv",
     )
     for p in peaks:
         log.info("mode %d : %.4f GHz", p["mode"], p["f_peak"] / 1e9)
@@ -513,7 +569,7 @@ def cmd_modes(args) -> int:
         prof = mp.apply_orientation(prof, args.rotate, args.flip_h, args.flip_v)
         profiles.append(prof)
 
-        tag = f"mode{p['mode']}_{p['f_peak'] / 1e9:.3f}GHz"
+        tag = f"{tag0}_mode{p['mode']}_{p['f_peak'] / 1e9:.3f}GHz"
         if not args.no_csv:
             np.savetxt(out / f"{tag}_profile.csv", prof, delimiter=",")
 
@@ -531,7 +587,8 @@ def cmd_modes(args) -> int:
 
     # ── 6. the download bundle ────────────────────────────────────────
     if args.npz_mode != "none":
-        bundle = out / f"{sim_dir.name}_{args.component}_modes.npz"
+        stem = bundle_stem(sim_dir, args.bundle_name)
+        bundle = out / f"{stem}_{args.component}_modes.npz"
         include_full = args.npz_mode in ("full", "both")
         if include_full:
             gib = P.nbytes / 1024 ** 3
@@ -555,7 +612,7 @@ def cmd_modes(args) -> int:
         try:
             from export.ppt_export import append_images_slide
             append_images_slide(out / args.pptx,
-                                [out / "spectrum.png", *images],
+                                [out / f"{tag0}_spectrum.png", *images],
                                 title=f"{sim_dir.name} - {args.component}")
             log.info("wrote %s", out / args.pptx)
         except ImportError as exc:
@@ -573,13 +630,17 @@ def cmd_modes(args) -> int:
 
 def cmd_fmr(args) -> int:
     _banner()
-    out = _outdir(args.outdir)
     t0 = time.time()
     rc = 0
 
     for table in args.tables:
-        table = Path(table).expanduser()
+        table = Path(table).expanduser().resolve()
         label = args.label or table.parent.name or table.stem
+        # Each table gets its own results folder next to it, so sweeping many
+        # runs never has one dataset's output land on another's.
+        out = _resolve_outdir(args, table.parent)
+        log.info("table      : %s", table)
+        log.info("results    : %s", out)
         try:
             df = load_table(table)
         except LoadError as exc:
@@ -650,7 +711,7 @@ def cmd_fmr(args) -> int:
             _save_fig(fig, out / f"{label}_spectrum_{args.b_stat:g}T.png",
                       args.dpi)
 
-    log.info("fmr complete in %.1f s -> %s", time.time() - t0, out)
+    log.info("fmr complete in %.1f s", time.time() - t0)
     return rc
 
 
@@ -660,12 +721,21 @@ def cmd_fmr(args) -> int:
 
 def cmd_hysteresis(args) -> int:
     _banner()
-    out = _outdir(args.outdir)
     datasets: list[tuple[np.ndarray, np.ndarray, str]] = []
     rc = 0
 
+    # Unlike modes/fmr, hysteresis deliberately MERGES several runs into one
+    # overlay, so there is no single "respective" simulation. Output goes with
+    # the first table listed; pass --outdir to put it somewhere neutral.
+    first_parent = Path(args.tables[0]).expanduser().resolve().parent
+    out = _resolve_outdir(args, first_parent)
+    if len(args.tables) > 1 and not args.outdir:
+        log.info("merging %d datasets -> writing to the first one's results "
+                 "folder: %s", len(args.tables), out)
+    log.info("results    : %s", out)
+
     for table in args.tables:
-        table = Path(table).expanduser()
+        table = Path(table).expanduser().resolve()
         label = table.parent.name or table.stem
         try:
             df = load_table(table)
@@ -787,7 +857,12 @@ def build_parser() -> argparse.ArgumentParser:
         return sp
 
     def common(sp):
-        sp.add_argument("--outdir", default="results", help="output directory")
+        sp.add_argument("--outdir", default=None,
+                        help="explicit output directory. Default: a 'results' "
+                             "folder inside the simulation directory, so each "
+                             "simulation carries its own analysis")
+        sp.add_argument("--results-subdir", default="results",
+                        help="name of that folder inside the simulation dir")
         sp.add_argument("--dpi", type=int, default=300, help="figure DPI")
         sp.add_argument("--cmap", default="inferno", help="matplotlib colormap")
         return logging_args(sp)
@@ -851,6 +926,10 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--no-csv", action="store_true",
                    help="skip the per-mode profile CSVs (they duplicate what "
                         "is already in the .npz)")
+    g.add_argument("--bundle-name", default=None,
+                   help="filename stem for the .npz. Default derives a stem "
+                        "that stays unique across a sweep, prepending the "
+                        "parent dir when the sim dir is a generic 'sim.out'")
     sp.set_defaults(func=cmd_modes)
 
     # -- fmr ---------------------------------------------------------

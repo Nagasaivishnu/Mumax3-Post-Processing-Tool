@@ -2,9 +2,10 @@
 # =============================================================================
 #  cluster/submit_array.slurm  --  process MANY simulations in parallel
 # =============================================================================
-#  This is the real payoff of moving to the cluster: instead of opening 40
-#  simulation directories one at a time in the GUI, SLURM runs all 40 at once
-#  on different nodes.
+#  This is the real payoff of moving to the cluster: instead of analysing 40
+#  simulation directories one at a time, SLURM runs all 40 at once on different
+#  nodes. Each task writes its results into its OWN simulation directory, so
+#  they cannot overwrite one another.
 #
 #  Usage
 #  -----
@@ -37,6 +38,9 @@ set -euo pipefail
 #  CONFIG
 # =============================================================================
 SIMLIST="${SIMLIST:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/simlist.txt}"
+# Each task writes into its own simulation's results folder, and mirrors to a
+# central tree. Set RESULT_ROOT="" to keep only the per-simulation copy.
+RESULTS_SUBDIR="results"
 RESULT_ROOT="${RESULT_ROOT:-$HOME/runs/results}"
 
 COMPONENT="My"
@@ -75,22 +79,27 @@ fi
 SIM_DIR="$(sed -n "${IDX}p" "${SIMLIST}")"
 SIM_DIR="${SIM_DIR%/}"
 NAME="$(basename "${SIM_DIR}")"
-# Keep the parent directory name too, so sweep_A/sim.out and sweep_B/sim.out
-# do not collide in the results tree.
+# Destination 1: inside the simulation itself. No collision is possible here --
+# each task writes only into the directory it was given.
+SIM_RESULTS="${SIM_DIR}/${RESULTS_SUBDIR}"
+# Computed from the real path, not the scratch copy cli.py will see.
+SIM_LABEL="$(sim_label "${SIM_DIR}")"
+# Destination 2: central mirror. Keep the parent directory name too, so
+# sweep_A/sim.out and sweep_B/sim.out do not collide in one flat tree.
 PARENT="$(basename "$(dirname "${SIM_DIR}")")"
-RESULT_DIR="${RESULT_ROOT}/${PARENT}__${NAME}"
+CENTRAL_RESULTS="${RESULT_ROOT:+${RESULT_ROOT}/${PARENT}__${NAME}}"
 
 log_info "array task  : ${IDX} / ${NLINES}"
 log_info "sim dir     : ${SIM_DIR}"
-log_info "result dir  : ${RESULT_DIR}"
+log_info "label       : ${SIM_LABEL}"
+log_info "results (1) : ${SIM_RESULTS}"
+log_info "results (2) : ${CENTRAL_RESULTS:-<central mirror disabled>}"
 log_info "node        : $(hostname)   cpus=${SLURM_CPUS_PER_TASK:-?}"
 
 if [[ ! -d "${SIM_DIR}" ]]; then
     log_error "not a directory: ${SIM_DIR}"
     exit 1
 fi
-
-mkdir -p "${RESULT_DIR}"
 
 SCRATCH="$(pick_scratch)_${IDX}"
 mkdir -p "${SCRATCH}"
@@ -101,7 +110,10 @@ cleanup() { local rc=$?; rm -rf "${SCRATCH}"; log_finish "${rc}"; }
 trap cleanup EXIT
 trap 'log_error "SIGTERM: scancel or walltime limit"; exit 143' TERM
 
-log_cmd rsync -a "${SIM_DIR}/" "${SCRATCH}/sim.out/"
+# Stage under the simulation's real name so each task's bundle is named after
+# its own simulation rather than all 40 sharing "sim.out_..._modes.npz".
+STAGED="${SCRATCH}/${NAME}"
+log_cmd rsync -a "${SIM_DIR}/" "${STAGED}/"
 
 export PROJECT_DIR PYTHON_MODULE VENV_DIR LOG_DIR
 
@@ -110,7 +122,7 @@ export PROJECT_DIR PYTHON_MODULE VENV_DIR LOG_DIR
 set +e
 log_cmd "${CONTAINER_WRAPPER}" --exec bash "${HERE}/container_script.sh" \
     modes \
-    --sim-dir   "${SCRATCH}/sim.out" \
+    --sim-dir   "${STAGED}" \
     --outdir    "${SCRATCH}/results" \
     --component "${COMPONENT}" \
     --dt        "${DT}" \
@@ -120,17 +132,27 @@ log_cmd "${CONTAINER_WRAPPER}" --exec bash "${HERE}/container_script.sh" \
     --f-min     "${F_MIN}" \
     --f-max     "${F_MAX}" \
     --avg-axis  "${AVG_AXIS}" \
-    --workers   "${SLURM_CPUS_PER_TASK:-8}"
+    --workers   "${SLURM_CPUS_PER_TASK:-8}" \
+    --bundle-name "${SIM_LABEL}"
 STATUS=$?
 set -e
 
-log_cmd rsync -a "${SCRATCH}/results/" "${RESULT_DIR}/" || true
-log_cmd rsync -a --include='fft_*.npz' --exclude='*' \
-      "${SCRATCH}/sim.out/" "${RESULT_DIR}/" || true
+mkdir -p "${SIM_RESULTS}"
+log_cmd rsync -a "${SCRATCH}/results/" "${SIM_RESULTS}/" || true
 
-mkdir -p "${RESULT_DIR}/logs"
+# fft_*.npz goes back beside the simulation data, not into results/, so a rerun
+# can find it and skip the FFT entirely.
+log_cmd rsync -a --include='fft_*.npz' --exclude='*' \
+      "${STAGED}/" "${SIM_DIR}/" || true
+
+mkdir -p "${SIM_RESULTS}/logs"
 [[ -n "${LOG_TRACE_FILE}" && -f "${LOG_TRACE_FILE}" ]] && \
-    cp "${LOG_TRACE_FILE}" "${RESULT_DIR}/logs/" 2>/dev/null || true
+    cp "${LOG_TRACE_FILE}" "${SIM_RESULTS}/logs/" 2>/dev/null || true
+
+if [[ -n "${CENTRAL_RESULTS}" ]]; then
+    mkdir -p "${CENTRAL_RESULTS}"
+    log_cmd rsync -a "${SIM_RESULTS}/" "${CENTRAL_RESULTS}/" || true
+fi
 
 log_info "task ${IDX} finished with status ${STATUS}"
 exit ${STATUS}

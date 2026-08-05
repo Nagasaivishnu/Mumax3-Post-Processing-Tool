@@ -67,6 +67,27 @@ pick_scratch() {
   echo "/tmp/mumax_$$"
 }
 
+# --- Helper: a label that stays unique across a sweep -------------------------
+#  MuMax3 names its output dir after the .mx3 file, so a parameter sweep is
+#  usually sweepA/sim.out, sweepB/sim.out, ... with an identical leaf name.
+#  Mirrors bundle_stem() in cli.py.
+#
+#  This must be computed from the REAL simulation path and passed to cli.py via
+#  --bundle-name. The jobs stage data onto node-local scratch first, so cli.py
+#  only ever sees /scratch/mumax_<jobid>/sim.out -- deriving a label there would
+#  encode the job ID instead of which simulation it was.
+sim_label() {
+  local dir="${1%/}"
+  local name parent
+  name="$(basename "${dir}")"
+  parent="$(basename "$(dirname "${dir}")")"
+  case "${name,,}" in
+    sim.out|output.out|out|sim|output|run.out)
+      [[ -n "${parent}" && "${parent}" != "/" ]] && echo "${parent}_${name}" || echo "${name}" ;;
+    *) echo "${name}" ;;
+  esac
+}
+
 # --- Sanity check -------------------------------------------------------------
 config_check() {
   local ok=0

@@ -1,0 +1,29 @@
+# Force LF endings on everything the cluster executes.
+#
+# You edit on Windows and run on Linux. A shell script saved with CRLF fails on
+# the cluster with errors like:
+#
+#     cluster/logs.sh: line 37: syntax error near unexpected token `$'in\r''
+#     /usr/bin/env: 'python3\r': No such file or directory
+#
+# because the trailing \r becomes part of the command or the shebang path.
+# Without this file, git's autocrlf on Windows silently reintroduces CRLF on
+# every checkout.
+
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.slurm text eol=lf
+*.py    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.mx3   text eol=lf
+
+# Binary — never touch
+*.npz   binary
+*.npy   binary
+*.ovf   binary
+*.png   binary
+*.pptx  binary
+*.pdf   binary

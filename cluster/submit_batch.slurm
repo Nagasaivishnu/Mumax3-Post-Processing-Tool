@@ -28,6 +28,9 @@ set -euo pipefail
 # =============================================================================
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-${HERE}/jobs.example.json}"
+# Leave outdir out of your JSON and each job writes into its own
+# simulation directory's results/ folder. RESULT_DIR is only used for
+# the closing log line.
 RESULT_DIR="${RESULT_DIR:-$HOME/runs/results}"
 
 # =============================================================================
@@ -63,7 +66,9 @@ log_cmd "${CONTAINER_WRAPPER}" --exec bash "${HERE}/container_script.sh" \
 STATUS=$?
 set -e
 
-log_info "finished with status ${STATUS} -- results under ${RESULT_DIR}"
+log_info "finished with status ${STATUS}"
+log_info "each job wrote into its own simulation dir; any explicit"
+log_info "outdir in ${CONFIG_FILE} overrode that"
 
 if command -v sacct >/dev/null 2>&1 && [[ -n "${SLURM_JOB_ID:-}" ]]; then
     sacct -j "${SLURM_JOB_ID}" \

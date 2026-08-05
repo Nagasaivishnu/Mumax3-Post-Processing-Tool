@@ -5,9 +5,13 @@
     "Every other key maps to a cli.py flag: underscores become dashes,",
     "so  n_peaks: 5  ->  --n-peaks 5,  and  interpolate: true  ->  --interpolate.",
     "A list value expands into multiple arguments (used for --tables).",
-    "Run 'python3 cli.py modes --help' to see every available key."
+    "Run 'python3 cli.py modes --help' to see every available key.",
+    "",
+    "Note there is no 'outdir' below. Leave it out and each job writes into",
+    "its own simulation directory's results/ folder -- <sim_dir>/results for",
+    "modes, <table.txt parent>/results for fmr. Add 'outdir' only when you",
+    "want output somewhere else entirely."
   ],
-
   "jobs": [
     {
       "command": "fmr",
@@ -21,10 +25,8 @@
       "f_min": 0,
       "f_max": 40,
       "f_meas": 9.5,
-      "b_stat": 0.05,
-      "outdir": "/home/USER/runs/results/fmr"
+      "b_stat": 0.05
     },
-
     {
       "command": "hysteresis",
       "tables": [
@@ -33,24 +35,21 @@
       ],
       "x_col": "B_extz (T)",
       "y_col": "mz ()",
-      "marker": "o",
-      "outdir": "/home/USER/runs/results/hysteresis"
+      "marker": "o"
     },
-
     {
       "command": "modes",
       "sim_dir": "/home/USER/runs/sweepA/sim.out",
       "component": "My",
       "dt": 5e-12,
-      "t_start": 3e-9,
-      "t_end": 25e-9,
+      "t_start": 3e-09,
+      "t_end": 2.5e-08,
       "n_peaks": 5,
       "f_min": 0,
       "f_max": 40,
       "avg_axis": "Z",
       "chunk_points": 1048576,
-      "pptx": "report.pptx",
-      "outdir": "/home/USER/runs/results/modes_sweepA"
+      "pptx": "report.pptx"
     }
   ]
 }
