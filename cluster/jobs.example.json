@@ -1,0 +1,56 @@
+{
+  "_comment": [
+    "Config for:  python3 cli.py run --config jobs.json",
+    "Each entry needs a 'command' of modes | fmr | hysteresis.",
+    "Every other key maps to a cli.py flag: underscores become dashes,",
+    "so  n_peaks: 5  ->  --n-peaks 5,  and  interpolate: true  ->  --interpolate.",
+    "A list value expands into multiple arguments (used for --tables).",
+    "Run 'python3 cli.py modes --help' to see every available key."
+  ],
+
+  "jobs": [
+    {
+      "command": "fmr",
+      "tables": [
+        "/home/USER/runs/sweepA/table.txt",
+        "/home/USER/runs/sweepB/table.txt"
+      ],
+      "dt": 5e-12,
+      "bias_dir": "y",
+      "mw_dir": "x",
+      "f_min": 0,
+      "f_max": 40,
+      "f_meas": 9.5,
+      "b_stat": 0.05,
+      "outdir": "/home/USER/runs/results/fmr"
+    },
+
+    {
+      "command": "hysteresis",
+      "tables": [
+        "/home/USER/runs/sweepA/table.txt",
+        "/home/USER/runs/sweepB/table.txt"
+      ],
+      "x_col": "B_extz (T)",
+      "y_col": "mz ()",
+      "marker": "o",
+      "outdir": "/home/USER/runs/results/hysteresis"
+    },
+
+    {
+      "command": "modes",
+      "sim_dir": "/home/USER/runs/sweepA/sim.out",
+      "component": "My",
+      "dt": 5e-12,
+      "t_start": 3e-9,
+      "t_end": 25e-9,
+      "n_peaks": 5,
+      "f_min": 0,
+      "f_max": 40,
+      "avg_axis": "Z",
+      "chunk_points": 1048576,
+      "pptx": "report.pptx",
+      "outdir": "/home/USER/runs/results/modes_sweepA"
+    }
+  ]
+}

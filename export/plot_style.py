@@ -12,7 +12,7 @@ publication look, which most journals accept:
 
 Usage
 -----
-    from gui.plot_style import set_origin_rcparams, style_axis
+    from export.plot_style import set_origin_rcparams, style_axis
 
     set_origin_rcparams()          # once, at application startup
     ...

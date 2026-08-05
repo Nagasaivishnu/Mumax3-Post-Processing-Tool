@@ -217,3 +217,11 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 ~$FMR_and_Mode_Math.pptx
+
+# --- cluster / SLURM ---------------------------------------------------------
+logs/                       # SLURM job output (%x_%j.out)
+cluster/.gui_launch.sh      # generated at runtime by interactive.sh
+cluster/simlist.txt         # your own list of simulation dirs
+cluster/jobs.json           # your own copy of jobs.example.json
+m_txyz.npy                  # OVF cache - large, always rebuildable
+fft_*.npz                   # FFT cache - large, always rebuildable

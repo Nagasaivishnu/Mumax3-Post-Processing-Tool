@@ -104,6 +104,19 @@ def load_dataset(
     """
     Load magnetisation snapshots from *sim_dir*.
 
+    .. deprecated::
+       Nothing in the CLI calls this any more. Use
+       ``processing.cluster_loader.load_dataset_lowmem``, which produces the
+       same values with ~1.0x peak memory instead of ~2.5x, and defaults to the
+       correct ``zyx`` axis order.
+
+       **This function's transpose is wrong** and is kept only so old results
+       can be reproduced: it returns ``(T, nx, ny, nz, 3)``, not the
+       ``(T, nz, ny, nx, 3)`` promised below, which makes ``get_spatial_profile``
+       average over the wrong axis. See the axis-order section of
+       cluster/README_CLUSTER.md. ``load_dataset_lowmem(..., axis_order="xyz")``
+       reproduces this behaviour exactly if you need it.
+
     1. If ``m_txyz.npy`` exists in *sim_dir*: load it (fast path).
     2. Otherwise: read all ``m*.ovf`` files in parallel → save ``m_txyz.npy``.
 
