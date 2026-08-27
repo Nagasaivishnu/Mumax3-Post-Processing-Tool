@@ -220,21 +220,26 @@ def compute_fft(
             f"{m_t.shape[0]} samples — widen the window."
         )
 
-    # Remove DC per spatial point
+    # Remove DC per spatial point (keep single precision)
+    m_t = m_t.astype(np.float32, copy=False)
     m_t -= m_t.mean(axis=0, keepdims=True)
 
-    # FFT along time axis
-    m_f = np.fft.fft(m_t, axis=0)             # (n_time_win, nz, ny, nx)
-    f   = np.fft.fftfreq(m_t.shape[0], d=dt)
+    # Real-input FFT along time, single precision.
+    #   * rfft returns only the non-negative frequencies (half the length),
+    #     so we never allocate the discarded negative half.
+    #   * scipy.fft preserves float32 → complex64 (8 bytes), vs numpy.fft
+    #     which always promotes to complex128 (16 bytes).
+    #   Together this uses ~1/4 the memory of the previous full fft.
+    from scipy.fft import rfft, rfftfreq
 
-    # Keep positive frequencies only
-    pos = f >= 0
-    f   = f[pos]
-    m_f = m_f[pos]
+    n = m_t.shape[0]
+    m_f = rfft(m_t, axis=0, overwrite_x=True)   # (n//2+1, nz, ny, nx) complex64
+    f   = rfftfreq(n, d=dt)
 
-    # Amplitude spectrum
-    P     = np.abs(m_f)                       # (n_freq, nz, ny, nx)
-    P_int = P.sum(axis=(1, 2, 3))             # (n_freq,)
+    # Amplitude spectrum → float32; free the complex array promptly
+    P = np.abs(m_f).astype(np.float32, copy=False)
+    del m_f
+    P_int = P.sum(axis=(1, 2, 3))               # (n_freq,)
 
     return {"f": f, "P": P, "P_int": P_int}
 

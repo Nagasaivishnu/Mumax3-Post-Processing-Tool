@@ -27,6 +27,8 @@ from PyQt6.QtWidgets import (
     QProgressBar, QSpinBox, QDialog, QScrollArea, QSizePolicy,
 )
 
+import pandas as pd
+
 from gui.plot_canvas import PlotCanvas
 from gui.plot_style import style_axis
 from processing.mode_profile import (
@@ -34,6 +36,7 @@ from processing.mode_profile import (
     apply_orientation, fft_cache_path, save_fft_result, load_fft_result,
     COMPONENT_ORDER, AVG_AXIS_MAP, AVG_TO_VIEW,
 )
+from export.csv_export import export_dataframe
 
 # Orientation combo labels → clockwise degrees
 ROTATION_MAP = {"0°": 0, "90° CW": 90, "180°": 180, "270° CW": 270}
@@ -268,6 +271,13 @@ class SpinWaveModeProfileTab(QWidget):
         )
         self._fft_force_btn.clicked.connect(lambda: self._do_fft(use_cache=False))
         proc_form.addRow("", self._fft_force_btn)
+
+        self._export_spec_btn = QPushButton("Export Spectrum CSV")
+        self._export_spec_btn.setToolTip(
+            "Save the integrated spin-wave mode spectrum P_int(f) to a CSV file."
+        )
+        self._export_spec_btn.clicked.connect(self._do_export_spectrum)
+        proc_form.addRow("", self._export_spec_btn)
 
         ctrl.addWidget(proc_grp)
 
@@ -588,6 +598,44 @@ class SpinWaveModeProfileTab(QWidget):
             f"M{p['mode']}:{p['f_peak']/1e9:.3f} GHz" for p in self._peaks
         )
         self._status_lbl.setText(f"Peaks: {summary}")
+
+    # ------------------------------------------------------------------
+    # Spectrum export
+    # ------------------------------------------------------------------
+
+    def _do_export_spectrum(self) -> None:
+        if self._fft_result is None:
+            QMessageBox.information(self, "No Spectrum", "Compute FFT first.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Spectrum CSV", "", "CSV (*.csv)"
+        )
+        if not path:
+            return
+
+        f     = self._fft_result["f"]
+        P_int = self._fft_result["P_int"]
+        df = pd.DataFrame({
+            "Frequency_Hz":         f,
+            "Frequency_GHz":        f * 1e-9,
+            "IntegratedPower_arb":  P_int,
+        })
+
+        # Mark detected peaks (mode number) if any
+        if self._peaks:
+            peak_col = [""] * len(f)
+            for pk in self._peaks:
+                idx = pk["pk_idx"]
+                if 0 <= idx < len(peak_col):
+                    peak_col[idx] = f"Mode {pk['mode']}"
+            df["Peak"] = peak_col
+
+        try:
+            export_dataframe(df, path)
+            QMessageBox.information(self, "Exported", f"Saved to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
 
     # ------------------------------------------------------------------
     # FMR spectrum plotting
