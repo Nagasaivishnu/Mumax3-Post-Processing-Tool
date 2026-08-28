@@ -294,6 +294,28 @@ class HysteresisTab(QWidget):
         xr_form.addRow("X max:", self._xmax_edit)
         ctrl_layout.addWidget(xr_grp)
 
+        # Plot size (inches) + DPI — used for the canvas and the saved image
+        size_grp  = QGroupBox("Plot Size")
+        size_form = QFormLayout(size_grp)
+        self._w_spin = QDoubleSpinBox()
+        self._w_spin.setRange(2.0, 30.0)
+        self._w_spin.setSingleStep(0.5)
+        self._w_spin.setValue(7.0)
+        self._w_spin.setSuffix(" in")
+        self._h_spin = QDoubleSpinBox()
+        self._h_spin.setRange(2.0, 30.0)
+        self._h_spin.setSingleStep(0.5)
+        self._h_spin.setValue(5.0)
+        self._h_spin.setSuffix(" in")
+        self._dpi_spin = QSpinBox()
+        self._dpi_spin.setRange(50, 1200)
+        self._dpi_spin.setValue(300)
+        self._dpi_spin.setToolTip("Resolution used when saving (PPT / toolbar save)")
+        size_form.addRow("Width:", self._w_spin)
+        size_form.addRow("Height:", self._h_spin)
+        size_form.addRow("Save DPI:", self._dpi_spin)
+        ctrl_layout.addWidget(size_grp)
+
         # ── OVF movie ─────────────────────────────────────────────────
         vid_grp    = QGroupBox("OVF Movie")
         vid_layout = QVBoxLayout(vid_grp)
@@ -525,6 +547,7 @@ class HysteresisTab(QWidget):
         self._last_merge_df = merge_datasets(merge_inputs, merge_x_label) \
             if merge_inputs else None
 
+        self._canvas.fig.set_size_inches(self._w_spin.value(), self._h_spin.value())
         ax = self._canvas.single_ax
         self._canvas.clear_axes()
         self._render_curves(ax, plan, comp_used, x_col, y_col, warn=True)
@@ -638,7 +661,8 @@ class HysteresisTab(QWidget):
             QMessageBox.warning(self, "Nothing to save", "Plot something first.")
             return
 
-        fig = Figure(figsize=(7, 5), dpi=300, tight_layout=True)
+        fig = Figure(figsize=(self._w_spin.value(), self._h_spin.value()),
+                     dpi=self._dpi_spin.value(), tight_layout=True)
         ax  = fig.add_subplot(111)
         self._render_curves(ax, plan, comp_used,
                             self._x_combo.currentText(),

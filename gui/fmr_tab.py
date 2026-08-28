@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QPushButton, QCheckBox, QLabel, QGroupBox,
     QFileDialog, QMessageBox, QSplitter, QDoubleSpinBox,
     QTabWidget, QRadioButton, QButtonGroup, QProgressBar,
-    QScrollArea, QLineEdit,
+    QScrollArea, QLineEdit, QSpinBox,
 )
 
 from gui.plot_canvas import PlotCanvas
@@ -27,6 +27,20 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 COLORMAPS = ["jet", "inferno", "plasma", "viridis", "hot", "gray", "RdBu_r"]
+
+
+def _make_size_controls(form, w_default=7.0, h_default=5.0, dpi_default=300):
+    """Add Width/Height (in) + Save DPI rows to *form*; return the 3 widgets."""
+    w = QDoubleSpinBox(); w.setRange(2.0, 30.0); w.setSingleStep(0.5)
+    w.setValue(w_default); w.setSuffix(" in")
+    h = QDoubleSpinBox(); h.setRange(2.0, 30.0); h.setSingleStep(0.5)
+    h.setValue(h_default); h.setSuffix(" in")
+    dpi = QSpinBox(); dpi.setRange(50, 1200); dpi.setValue(dpi_default)
+    dpi.setToolTip("Resolution used when saving the image")
+    form.addRow("Width:", w)
+    form.addRow("Height:", h)
+    form.addRow("Save DPI:", dpi)
+    return w, h, dpi
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +410,22 @@ class _HeatmapSubTab(QWidget):
         ppt_row.addWidget(self._ppt_btn)
         layout.addLayout(ppt_row)
 
+        # Plot size (per heatmap) + DPI — view and save
+        size_row = QHBoxLayout()
+        size_row.addWidget(QLabel("W:"))
+        self._w_spin = QDoubleSpinBox(); self._w_spin.setRange(2.0, 30.0)
+        self._w_spin.setSingleStep(0.5); self._w_spin.setValue(8.0); self._w_spin.setSuffix(" in")
+        size_row.addWidget(self._w_spin)
+        size_row.addWidget(QLabel("H:"))
+        self._h_spin = QDoubleSpinBox(); self._h_spin.setRange(2.0, 30.0)
+        self._h_spin.setSingleStep(0.5); self._h_spin.setValue(4.0); self._h_spin.setSuffix(" in")
+        size_row.addWidget(self._h_spin)
+        size_row.addWidget(QLabel("DPI:"))
+        self._dpi_spin = QSpinBox(); self._dpi_spin.setRange(50, 1200); self._dpi_spin.setValue(300)
+        size_row.addWidget(self._dpi_spin)
+        size_row.addStretch()
+        layout.addLayout(size_row)
+
         # Export button
         self._export_btn = QPushButton("Export All Heatmap Data (CSV)…")
         self._export_btn.clicked.connect(self._do_export)
@@ -419,8 +449,9 @@ class _HeatmapSubTab(QWidget):
             c.deleteLater()
         self._canvases.clear()
 
+        w, h = self._w_spin.value(), self._h_spin.value()
         for label, fields, f, mFFTs in results:
-            canvas = PlotCanvas(self._container, n_rows=1, n_cols=1, figsize=(8, 4))
+            canvas = PlotCanvas(self._container, n_rows=1, n_cols=1, figsize=(w, h))
             self._c_layout.addWidget(canvas)
             self._canvases.append(canvas)
             render_heatmap(
@@ -464,8 +495,9 @@ class _HeatmapSubTab(QWidget):
         tmpdir = Path(tempfile.mkdtemp(prefix="mumax_fmr_ppt_"))
         images = []
         for i, (label, fields, f, mFFTs) in enumerate(self._last_results):
-            # Fresh figure at a fixed publication size, Origin-styled.
-            fig = Figure(figsize=(6.5, 4.0), dpi=300, tight_layout=True)
+            # Fresh figure at the chosen size, Origin-styled.
+            fig = Figure(figsize=(self._w_spin.value(), self._h_spin.value()),
+                         dpi=self._dpi_spin.value(), tight_layout=True)
             ax  = fig.add_subplot(111)
             render_heatmap(
                 fig, ax, label, fields, f, mFFTs,
@@ -585,6 +617,10 @@ class _BaseSliceTab(QWidget):
         ctrl_form.addRow("Y min:", self._ymin_edit)
         ctrl_form.addRow("Y max:", self._ymax_edit)
 
+        # Plot size (inches) + DPI — view and save
+        self._w_spin, self._h_spin, self._dpi_spin = _make_size_controls(
+            ctrl_form, 7.0, 5.0)
+
         layout.addWidget(ctrl_grp)
 
         btn_row = QHBoxLayout()
@@ -662,6 +698,7 @@ class _BaseSliceTab(QWidget):
         self._last_curves = (curves, x_label, y_label)
         self._last_export_data = (x_plot, y_sets, x_label)
 
+        self._canvas.fig.set_size_inches(self._w_spin.value(), self._h_spin.value())
         ax = self._canvas.single_ax
         self._canvas.clear_axes()
         self._render_slice(ax, warn=True)
@@ -736,7 +773,8 @@ class _BaseSliceTab(QWidget):
         from matplotlib.figure import Figure
 
         # Re-render into a fresh publication ("Origin") figure.
-        fig = Figure(figsize=(7, 5), dpi=300, tight_layout=True)
+        fig = Figure(figsize=(self._w_spin.value(), self._h_spin.value()),
+                     dpi=self._dpi_spin.value(), tight_layout=True)
         ax  = fig.add_subplot(111)
         self._render_slice(ax, warn=False)
 

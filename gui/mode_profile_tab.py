@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QPushButton, QCheckBox, QLabel, QGroupBox,
     QFileDialog, QMessageBox, QSplitter, QLineEdit,
     QProgressBar, QSpinBox, QDialog, QScrollArea, QSizePolicy,
+    QDoubleSpinBox,
 )
 
 import pandas as pd
@@ -304,6 +305,20 @@ class SpinWaveModeProfileTab(QWidget):
 
         ctrl.addWidget(peak_grp)
 
+        # 4b ─ Spectrum plot title ─────────────────────────────────────
+        title_grp  = QGroupBox("Spectrum Plot")
+        title_form = QFormLayout(title_grp)
+        self._title_edit = QLineEdit()
+        self._title_edit.setPlaceholderText("(dataset name)")
+        self._title_edit.setToolTip(
+            "Title shown on the FMR spectrum plot.\n"
+            "Leave blank to use the dataset name."
+        )
+        title_form.addRow("Title:", self._title_edit)
+        ctrl.addWidget(title_grp)
+        # keep the placeholder in sync with the selected dataset
+        self._ds_combo.currentIndexChanged.connect(self._update_title_placeholder)
+
         # 5 ─ Visualisation ────────────────────────────────────────────
         vis_grp  = QGroupBox("Mode Visualisation")
         vis_form = QFormLayout(vis_grp)
@@ -369,7 +384,21 @@ class SpinWaveModeProfileTab(QWidget):
 
         ctrl.addWidget(vis_grp)
 
-        # 6 ─ PowerPoint export ────────────────────────────────────────
+        # 6 ─ Plot size (inches) + DPI — view and save ─────────────────
+        size_grp  = QGroupBox("Plot Size")
+        size_form = QFormLayout(size_grp)
+        self._w_spin = QDoubleSpinBox(); self._w_spin.setRange(2.0, 30.0)
+        self._w_spin.setSingleStep(0.5); self._w_spin.setValue(8.0); self._w_spin.setSuffix(" in")
+        self._h_spin = QDoubleSpinBox(); self._h_spin.setRange(2.0, 30.0)
+        self._h_spin.setSingleStep(0.5); self._h_spin.setValue(5.0); self._h_spin.setSuffix(" in")
+        self._dpi_spin = QSpinBox(); self._dpi_spin.setRange(50, 1200); self._dpi_spin.setValue(300)
+        self._dpi_spin.setToolTip("Resolution used when saving images")
+        size_form.addRow("Width:", self._w_spin)
+        size_form.addRow("Height:", self._h_spin)
+        size_form.addRow("Save DPI:", self._dpi_spin)
+        ctrl.addWidget(size_grp)
+
+        # 7 ─ PowerPoint export ────────────────────────────────────────
         ppt_grp    = QGroupBox("Export to PowerPoint")
         ppt_layout = QVBoxLayout(ppt_grp)
 
@@ -421,6 +450,12 @@ class SpinWaveModeProfileTab(QWidget):
         if idx >= 0:
             self._ds_combo.setCurrentIndex(idx)
         self._ds_combo.blockSignals(False)
+        self._update_title_placeholder()
+
+    def _update_title_placeholder(self) -> None:
+        """Show the current dataset name as the default-title placeholder."""
+        entry = self._ds_combo.currentData()
+        self._title_edit.setPlaceholderText(entry.label if entry else "(dataset name)")
 
     def _current_entry(self):
         return self._ds_combo.currentData()
@@ -647,6 +682,7 @@ class SpinWaveModeProfileTab(QWidget):
 
         f     = self._fft_result["f"]
         P_int = self._fft_result["P_int"]
+        self._canvas.fig.set_size_inches(self._w_spin.value(), self._h_spin.value())
         ax    = self._canvas.single_ax
         self._canvas.clear_axes()
 
@@ -663,6 +699,13 @@ class SpinWaveModeProfileTab(QWidget):
         ax.plot(f_ghz[mask], P_int[mask], color="black", linewidth=1.5)
         ax.set_xlabel("Frequency (GHz)", fontsize=12)
         ax.set_ylabel("Integrated Power (arb. units)", fontsize=12)
+
+        # Title: user text, or the dataset name by default
+        entry = self._current_entry()
+        title = self._title_edit.text().strip() or (entry.label if entry else "")
+        if title:
+            ax.set_title(title, fontsize=13)
+
         style_axis(ax)   # publication ("Origin") styling
 
         # Overlay peak markers
@@ -797,7 +840,8 @@ class SpinWaveModeProfileTab(QWidget):
 
         # 1 ─ FFT spectrum (current right-panel plot, incl. peak markers)
         spec_png = tmpdir / "fmr_spectrum.png"
-        self._canvas.fig.savefig(spec_png, dpi=150, bbox_inches="tight")
+        self._canvas.fig.savefig(spec_png, dpi=self._dpi_spin.value(),
+                                 bbox_inches="tight")
         images.append(str(spec_png))
 
         # 2 ─ spatial mode profiles (modes listed in the Modes field)
@@ -834,12 +878,13 @@ class SpinWaveModeProfileTab(QWidget):
                     self._fft_result["P"], pk["pk_idx"], avg_axis
                 )
                 sp2d = apply_orientation(sp2d, *self._current_orientation())
-                fig = Figure(figsize=(5, 4), tight_layout=True)
+                fig = Figure(figsize=(self._w_spin.value(), self._h_spin.value()),
+                             tight_layout=True)
                 ax  = fig.add_subplot(111)
                 draw_mode_profile(fig, ax, sp2d, pk["mode"], pk["f_peak"],
                                   avg_axis, cmap, scale, vmin, vmax)
                 png = tmpdir / f"mode_{mode_num}.png"
-                fig.savefig(png, dpi=150)
+                fig.savefig(png, dpi=self._dpi_spin.value())
                 images.append(str(png))
                 n_modes += 1
 
