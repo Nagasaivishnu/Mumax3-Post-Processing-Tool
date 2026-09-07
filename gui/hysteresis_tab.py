@@ -231,7 +231,7 @@ class HysteresisTab(QWidget):
         self._lw_spin = QDoubleSpinBox()
         self._lw_spin.setRange(0.5, 5.0)
         self._lw_spin.setSingleStep(0.5)
-        self._lw_spin.setValue(1.5)
+        self._lw_spin.setValue(2.2)
         app_form.addRow("Line width:", self._lw_spin)
 
         self._ms_spin = QSpinBox()

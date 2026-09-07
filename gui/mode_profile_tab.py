@@ -154,9 +154,14 @@ class SpinWaveModeProfileTab(QWidget):
         self._peaks: list[dict]           = []
         self._load_worker: _LoadWorker | None = None
         self._fft_worker:  _FFTWorker  | None = None
+        self._plotter = None               # set by MainWindow.set_plotter
 
         self._build_ui()
         self._fm.datasets_changed.connect(self._refresh_dataset_combo)
+
+    def set_plotter(self, plotter) -> None:
+        """Give the tab a reference to the Plotter tab (Send to Plotter)."""
+        self._plotter = plotter
 
     # ------------------------------------------------------------------
     # UI construction
@@ -315,6 +320,15 @@ class SpinWaveModeProfileTab(QWidget):
             "Leave blank to use the dataset name."
         )
         title_form.addRow("Title:", self._title_edit)
+
+        self._send_plotter_btn = QPushButton("Send to Plotter")
+        self._send_plotter_btn.setToolTip(
+            "Send the current FMR spectrum to the Plotter tab, using the title "
+            "above (or the dataset name) as its title."
+        )
+        self._send_plotter_btn.clicked.connect(self._do_send_to_plotter)
+        title_form.addRow("", self._send_plotter_btn)
+
         ctrl.addWidget(title_grp)
         # keep the placeholder in sync with the selected dataset
         self._ds_combo.currentIndexChanged.connect(self._update_title_placeholder)
@@ -635,6 +649,39 @@ class SpinWaveModeProfileTab(QWidget):
         self._status_lbl.setText(f"Peaks: {summary}")
 
     # ------------------------------------------------------------------
+    # Send spectrum to the Plotter tab
+    # ------------------------------------------------------------------
+
+    def _do_send_to_plotter(self) -> None:
+        if self._plotter is None:
+            QMessageBox.information(self, "Plotter Unavailable",
+                                    "The Plotter tab is not available.")
+            return
+        if self._fft_result is None:
+            QMessageBox.information(self, "No Spectrum", "Compute FFT first.")
+            return
+
+        from processing.plot_bundle import make_plot_item
+
+        f     = self._fft_result["f"]
+        P_int = self._fft_result["P_int"]
+        f_ghz = f * 1e-9      # full available spectrum (no frequency window)
+
+        entry = self._current_entry()
+        title = self._title_edit.text().strip() or (entry.label if entry else "Spectrum")
+        peaks = [{"mode": p["mode"], "f": p["f_peak"] * 1e-9} for p in self._peaks]
+
+        item = make_plot_item(
+            title,
+            f_ghz, P_int,
+            x_label="Frequency (GHz)",
+            y_label="Integrated Power (arb. units)",
+            peaks=peaks,
+        )
+        self._plotter.add_plot(item)
+        self._status_lbl.setText(f"Sent '{title}' to Plotter.")
+
+    # ------------------------------------------------------------------
     # Spectrum export
     # ------------------------------------------------------------------
 
@@ -696,7 +743,7 @@ class SpinWaveModeProfileTab(QWidget):
         f_ghz = f * 1e-9
         mask  = (f_ghz >= f_min_ghz) & (f_ghz <= f_max_ghz)
 
-        ax.plot(f_ghz[mask], P_int[mask], color="black", linewidth=1.5)
+        ax.plot(f_ghz[mask], P_int[mask], color="black", linewidth=2.2)
         ax.set_xlabel("Frequency (GHz)", fontsize=12)
         ax.set_ylabel("Integrated Power (arb. units)", fontsize=12)
 

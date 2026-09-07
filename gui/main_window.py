@@ -19,6 +19,7 @@ from gui.file_manager import FileManagerWidget
 from gui.hysteresis_tab import HysteresisTab
 from gui.fmr_tab import FMRTab
 from gui.mode_profile_tab import SpinWaveModeProfileTab
+from gui.plotter_tab import PlotterTab
 from gui.frame_viewer import FrameViewerWidget
 
 logger = logging.getLogger(__name__)
@@ -62,10 +63,15 @@ class MainWindow(QMainWindow):
         self._hyst_tab    = HysteresisTab(self._fm)
         self._fmr_tab     = FMRTab(self._fm)
         self._mode_tab    = SpinWaveModeProfileTab(self._fm)
+        self._plotter_tab = PlotterTab()
         self._tabs.addTab(self._hyst_tab,  "Hysteresis")
         self._tabs.addTab(self._fmr_tab,   "FMR")
         self._tabs.addTab(self._mode_tab,  "Spin Wave Mode Profile")
+        self._tabs.addTab(self._plotter_tab, "Plotter")
         splitter.addWidget(self._tabs)
+
+        # let the mode-profile tab send plots to the Plotter tab
+        self._mode_tab.set_plotter(self._plotter_tab)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)

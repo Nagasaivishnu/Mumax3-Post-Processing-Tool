@@ -44,29 +44,29 @@ def set_origin_rcparams() -> None:
         "legend.fontsize":  11,
         "mathtext.fontset": "dejavusans",
 
-        # ── frame / spines ─────────────────────────────────────────────
-        "axes.linewidth":   1.4,
+        # ── frame / spines (bold) ──────────────────────────────────────
+        "axes.linewidth":   2.2,
         "axes.edgecolor":   "black",
         "axes.grid":        False,
 
-        # ── ticks: inward, on all four sides ───────────────────────────
+        # ── ticks: inward, on all four sides (bold) ────────────────────
         "xtick.direction":  "in",
         "ytick.direction":  "in",
         "xtick.top":        True,
         "ytick.right":      True,
-        "xtick.major.size": 6.0,
-        "ytick.major.size": 6.0,
-        "xtick.minor.size": 3.0,
-        "ytick.minor.size": 3.0,
-        "xtick.major.width": 1.4,
-        "ytick.major.width": 1.4,
-        "xtick.minor.width": 1.0,
-        "ytick.minor.width": 1.0,
+        "xtick.major.size": 7.0,
+        "ytick.major.size": 7.0,
+        "xtick.minor.size": 4.0,
+        "ytick.minor.size": 4.0,
+        "xtick.major.width": 2.2,
+        "ytick.major.width": 2.2,
+        "xtick.minor.width": 1.4,
+        "ytick.minor.width": 1.4,
         "xtick.minor.visible": True,
         "ytick.minor.visible": True,
 
         # ── lines / legend / figure ────────────────────────────────────
-        "lines.linewidth":  1.6,
+        "lines.linewidth":  2.2,
         "legend.frameon":   False,
         "figure.facecolor": "white",
         "axes.facecolor":   "white",
@@ -101,5 +101,5 @@ def style_axis(ax, minor: bool = True, box: bool = True) -> None:
 
     ax.tick_params(which="both", direction="in",
                    top=True, right=True)
-    ax.tick_params(which="major", length=6.0, width=lw)
-    ax.tick_params(which="minor", length=3.0, width=1.0)
+    ax.tick_params(which="major", length=7.0, width=lw)
+    ax.tick_params(which="minor", length=4.0, width=max(1.4, lw * 0.6))
