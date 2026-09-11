@@ -248,6 +248,27 @@ class SpinWaveModeProfileTab(QWidget):
         )
         proc_form.addRow("Component:", self._comp_combo)
 
+        self._spec_combo = QComboBox()
+        self._spec_combo.addItems([
+            "Coherent  |\u03a3 FFT|   (FMR-visible)",
+            "Incoherent  \u03a3|FFT|   (all modes)",
+            "Both (overlay)",
+        ])
+        self._spec_combo.setCurrentIndex(0)
+        self._spec_combo.setToolTip(
+            "How the per-cell spectra are combined into one curve.\n\n"
+            "Coherent  |\u03a3 FFT| : complex spectra summed first, modulus after.\n"
+            "  = net precessing moment, i.e. what a uniform microwave field\n"
+            "  couples to. Modes whose phase cancels across the structure stay\n"
+            "  dark, exactly as in a real FMR / VNA measurement.\n\n"
+            "Incoherent  \u03a3|FFT| : modulus taken per cell, then summed.\n"
+            "  Every mode appears regardless of symmetry \u2014 good for\n"
+            "  enumerating modes, but it over-represents dark ones.\n\n"
+            "A peak in \u03a3|FFT| with no counterpart in |\u03a3 FFT| is a dark mode."
+        )
+        self._spec_combo.currentIndexChanged.connect(self._on_spec_mode_changed)
+        proc_form.addRow("Spectrum:", self._spec_combo)
+
         self._dt_edit = QLineEdit("10e-12")
         self._dt_edit.setPlaceholderText("e.g. 5e-12")
         self._dt_edit.setToolTip("Saving interval [s] – scientific notation OK")
@@ -631,9 +652,10 @@ class SpinWaveModeProfileTab(QWidget):
             return
 
         try:
+            _lbl, P_use = self._primary_spectrum()
             self._peaks = find_fmr_peaks(
                 self._fft_result["f"],
-                self._fft_result["P_int"],
+                P_use,
                 n_peaks, f_min_ghz, f_max_ghz,
             )
         except ValueError as exc:
@@ -663,9 +685,9 @@ class SpinWaveModeProfileTab(QWidget):
 
         from processing.plot_bundle import make_plot_item
 
-        f     = self._fft_result["f"]
-        P_int = self._fft_result["P_int"]
-        f_ghz = f * 1e-9      # full available spectrum (no frequency window)
+        f            = self._fft_result["f"]
+        y_lbl, P_int = self._primary_spectrum()
+        f_ghz        = f * 1e-9   # full available spectrum (no frequency window)
 
         entry = self._current_entry()
         title = self._title_edit.text().strip() or (entry.label if entry else "Spectrum")
@@ -675,7 +697,7 @@ class SpinWaveModeProfileTab(QWidget):
             title,
             f_ghz, P_int,
             x_label="Frequency (GHz)",
-            y_label="Integrated Power (arb. units)",
+            y_label=f"{y_lbl} (arb. units)",
             peaks=peaks,
         )
         self._plotter.add_plot(item)
@@ -698,11 +720,15 @@ class SpinWaveModeProfileTab(QWidget):
 
         f     = self._fft_result["f"]
         P_int = self._fft_result["P_int"]
-        df = pd.DataFrame({
-            "Frequency_Hz":         f,
-            "Frequency_GHz":        f * 1e-9,
-            "IntegratedPower_arb":  P_int,
-        })
+        P_coh = self._fft_result.get("P_coh")
+        cols  = {
+            "Frequency_Hz":           f,
+            "Frequency_GHz":          f * 1e-9,
+            "Incoherent_sum_absFFT":  P_int,
+        }
+        if P_coh is not None:
+            cols["Coherent_absSumFFT"] = P_coh
+        df = pd.DataFrame(cols)
 
         # Mark detected peaks (mode number) if any
         if self._peaks:
@@ -720,6 +746,56 @@ class SpinWaveModeProfileTab(QWidget):
             QMessageBox.critical(self, "Export Error", str(e))
 
     # ------------------------------------------------------------------
+    # Coherent / incoherent spectrum selection
+    # ------------------------------------------------------------------
+
+    SPEC_COHERENT   = 0
+    SPEC_INCOHERENT = 1
+    SPEC_BOTH       = 2
+
+    def _spectrum_curves(self) -> list:
+        """
+        Spectra to display, as a list of (label, array, colour).
+
+        Falls back to the incoherent spectrum when the active FFT came from a
+        cache file written before P_coh existed.
+        """
+        res = self._fft_result
+        if res is None:
+            return []
+
+        P_int = res["P_int"]
+        P_coh = res.get("P_coh")
+        mode  = self._spec_combo.currentIndex()
+
+        if P_coh is None and mode in (self.SPEC_COHERENT, self.SPEC_BOTH):
+            self._status_lbl.setText(
+                "This FFT cache predates the coherent spectrum \u2014 press "
+                "'Recompute FFT (ignore cache)' to get |\u03a3 FFT|. "
+                "Showing \u03a3|FFT| meanwhile."
+            )
+            return [("Incoherent  \u03a3|FFT|", P_int, "black")]
+
+        if mode == self.SPEC_COHERENT:
+            return [("Coherent  |\u03a3 FFT|", P_coh, "black")]
+        if mode == self.SPEC_INCOHERENT:
+            return [("Incoherent  \u03a3|FFT|", P_int, "black")]
+        return [
+            ("Coherent  |\u03a3 FFT|",  P_coh, "black"),
+            ("Incoherent  \u03a3|FFT|", P_int, "#B85042"),
+        ]
+
+    def _primary_spectrum(self):
+        """The single curve used for peak finding, CSV export and the Plotter."""
+        curves = self._spectrum_curves()
+        label, arr, _colour = curves[0]
+        return label, arr
+
+    def _on_spec_mode_changed(self) -> None:
+        if self._fft_result is not None:
+            self._plot_spectrum(with_peaks=bool(self._peaks))
+
+    # ------------------------------------------------------------------
     # FMR spectrum plotting
     # ------------------------------------------------------------------
 
@@ -727,8 +803,10 @@ class SpinWaveModeProfileTab(QWidget):
         if self._fft_result is None:
             return
 
-        f     = self._fft_result["f"]
-        P_int = self._fft_result["P_int"]
+        f      = self._fft_result["f"]
+        curves = self._spectrum_curves()
+        if not curves:
+            return
         self._canvas.fig.set_size_inches(self._w_spin.value(), self._h_spin.value())
         ax    = self._canvas.single_ax
         self._canvas.clear_axes()
@@ -743,9 +821,15 @@ class SpinWaveModeProfileTab(QWidget):
         f_ghz = f * 1e-9
         mask  = (f_ghz >= f_min_ghz) & (f_ghz <= f_max_ghz)
 
-        ax.plot(f_ghz[mask], P_int[mask], color="black", linewidth=2.2)
+        for c_label, c_arr, c_colour in curves:
+            ax.plot(f_ghz[mask], c_arr[mask], color=c_colour,
+                    linewidth=2.2, label=c_label)
         ax.set_xlabel("Frequency (GHz)", fontsize=12)
-        ax.set_ylabel("Integrated Power (arb. units)", fontsize=12)
+        ax.set_ylabel(
+            "Spectral amplitude (arb. units)" if len(curves) > 1
+            else f"{curves[0][0]} (arb. units)",
+            fontsize=12,
+        )
 
         # Title: user text, or the dataset name by default
         entry = self._current_entry()
@@ -768,6 +852,8 @@ class SpinWaveModeProfileTab(QWidget):
                     f"Mode {pk['mode']}\n{f_ghz_pk:.3f} GHz",
                     color=color, fontsize=9, va="top", rotation=90,
                 )
+
+        if len(curves) > 1 or (with_peaks and self._peaks):
             ax.legend(frameon=False, fontsize=9)
 
         self._canvas.draw()

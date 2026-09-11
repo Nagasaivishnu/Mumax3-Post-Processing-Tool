@@ -202,8 +202,26 @@ def compute_fft(
     -------
     dict with keys:
         'f'     : positive frequency array [Hz]  shape (n_freq,)
-        'P'     : spatial power             shape (n_freq, nz, ny, nx)
-        'P_int' : spatially integrated power shape (n_freq,)
+        'P'     : spatial amplitude spectrum shape (n_freq, nz, ny, nx)
+        'P_int' : INCOHERENT spatial sum, sum|FFT|      shape (n_freq,)
+        'P_coh' : COHERENT   spatial sum, |sum FFT|     shape (n_freq,)
+
+    P_int vs P_coh
+    --------------
+    'P_int' takes the modulus of every cell's spectrum *before* summing, so
+    phase information is discarded and every cell contributes positively.
+    Every mode of the structure shows up, whatever its symmetry.
+
+    'P_coh' sums the complex spectra *first* and takes the modulus after, so
+    it is the net precessing moment of the whole structure.  That is the
+    quantity a uniform microwave drive couples to, so modes whose precession
+    phase cancels across the sample (odd-order standing modes, antisymmetric
+    edge modes) stay dark here exactly as they do in a real FMR / VNA
+    measurement.
+
+    Use P_coh to compare against experiment; use P_int to enumerate every
+    mode present.  A peak in P_int with no counterpart in P_coh is a dark
+    mode -- real in the simulation, invisible to a uniform-field experiment.
     """
     # Select component → (n_time, nz, ny, nx)
     m_t = extract_component(m_raw, component)
@@ -236,12 +254,21 @@ def compute_fft(
     m_f = rfft(m_t, axis=0, overwrite_x=True)   # (n//2+1, nz, ny, nx) complex64
     f   = rfftfreq(n, d=dt)
 
+    # Coherent spatial sum -- MUST be taken on the complex spectrum, before
+    # any np.abs(), so that cancelling phases cancel.  complex128 accumulator
+    # avoids float32 round-off when summing over many cells.
+    P_coh = np.abs(
+        m_f.sum(axis=(1, 2, 3), dtype=np.complex128)
+    ).astype(np.float32)                        # (n_freq,)
+
     # Amplitude spectrum → float32; free the complex array promptly
     P = np.abs(m_f).astype(np.float32, copy=False)
     del m_f
+
+    # Incoherent spatial sum -- phase discarded, every mode counted.
     P_int = P.sum(axis=(1, 2, 3))               # (n_freq,)
 
-    return {"f": f, "P": P, "P_int": P_int}
+    return {"f": f, "P": P, "P_int": P_int, "P_coh": P_coh}
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +323,11 @@ def save_fft_result(
     Returns the path of the written .npz file.
     """
     path = fft_cache_path(sim_dir, component, dt, t_start, t_end)
-    np.savez(path, f=result["f"], P=result["P"], P_int=result["P_int"])
+    arrays = {"f": result["f"], "P": result["P"], "P_int": result["P_int"]}
+    # P_coh is absent only when *result* came from a pre-P_coh cache file.
+    if result.get("P_coh") is not None:
+        arrays["P_coh"] = result["P_coh"]
+    np.savez(path, **arrays)
     logger.info("Saved FFT cache → %s", path)
     return path
 
@@ -306,7 +337,10 @@ def load_fft_result(path: str | Path) -> dict:
     Load a previously saved FFT result.
 
     Returns the same dict structure as compute_fft:
-    {'f', 'P', 'P_int'}.
+    {'f', 'P', 'P_int', 'P_coh'}.
+
+    Cache files written before P_coh existed are still readable; their
+    'P_coh' entry is None.  Recompute (ignoring the cache) to obtain it.
 
     Raises
     ------
@@ -321,6 +355,7 @@ def load_fft_result(path: str | Path) -> dict:
                 "Delete the file and recompute."
             )
         result = {"f": data["f"], "P": data["P"], "P_int": data["P_int"]}
+        result["P_coh"] = data["P_coh"] if "P_coh" in data.files else None
     logger.info("Loaded FFT cache ← %s", path)
     return result
 
