@@ -7,6 +7,7 @@ The heavy lifting is in processing/fmr.py; this file is UI only.
 
 from __future__ import annotations
 import logging
+from pathlib import Path
 
 import numpy as np
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
@@ -15,7 +16,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QPushButton, QCheckBox, QLabel, QGroupBox,
     QFileDialog, QMessageBox, QSplitter, QDoubleSpinBox,
     QTabWidget, QRadioButton, QButtonGroup, QProgressBar,
-    QScrollArea, QLineEdit, QSpinBox,
+    QScrollArea, QLineEdit, QSpinBox, QDialog, QDialogButtonBox,
 )
 
 from gui.plot_canvas import PlotCanvas
@@ -27,6 +28,40 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 COLORMAPS = ["jet", "inferno", "plasma", "viridis", "hot", "gray", "RdBu_r"]
+
+OE_PER_TESLA = 1.0e4      # 1 T = 10000 Oe
+
+
+class _FMRDatasetDialog(QDialog):
+    """Pick which datasets are plotted (heatmap + slices)."""
+
+    def __init__(self, labels, state: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Dataset Selection")
+        self.resize(320, 360)
+        self._checks = {}
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Datasets to include when plotting:"))
+
+        inner = QWidget()
+        form = QVBoxLayout(inner)
+        for lbl in labels:
+            cb = QCheckBox(lbl)
+            cb.setChecked(state.get(lbl, True))
+            form.addWidget(cb)
+            self._checks[lbl] = cb
+        form.addStretch()
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(inner)
+        lay.addWidget(scroll)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+
+    def result_state(self) -> dict:
+        return {lbl: cb.isChecked() for lbl, cb in self._checks.items()}
 
 
 def _make_size_controls(form, w_default=7.0, h_default=5.0, dpi_default=300):
@@ -61,6 +96,10 @@ def render_heatmap(
     vmax: float,
     freq_max_ghz: float,
     freq_min_ghz: float = 2.0,
+    field_scale: float = 1.0,
+    field_unit: str = "T",
+    field_min=None,
+    field_max=None,
 ) -> None:
     """
     Draw one |χ(f, B)| heatmap onto (fig, ax) in publication ("Origin") style.
@@ -69,9 +108,15 @@ def render_heatmap(
     -------------
     auto_range=True   → limits taken from the data (log: min-positive…max).
     auto_range=False  → vmin/vmax are ABSOLUTE |χ| values.
+
+    Field axis
+    ----------
+    fields are in Tesla; multiplied by *field_scale* for display (e.g. 1e4
+    for Oersted) and limited to [field_min, field_max] in the display unit.
     """
     import matplotlib.colors as mcolors
 
+    fields = np.asarray(fields) * field_scale
     f_ghz  = f * 1e-9
     f_mask = (f_ghz >= freq_min_ghz) & (f_ghz <= freq_max_ghz)
     f_plot = f_ghz[f_mask]
@@ -104,10 +149,17 @@ def render_heatmap(
         Z, aspect="auto", origin="lower", extent=extent,
         cmap=cmap, norm=norm, **imshow_kw,
     )
-    ax.set_xlabel("Magnetic Field (T)", fontsize=11)
+    ax.set_xlabel(f"Magnetic Field ({field_unit})", fontsize=11)
     ax.set_ylabel("Frequency (GHz)", fontsize=11)
     ax.set_title(label, fontsize=12)
     style_axis(ax, minor=False)          # Origin box + inward ticks
+
+    # Field axis range (display unit)
+    if field_min is not None or field_max is not None:
+        lo, hi = ax.get_xlim()
+        ax.set_xlim(field_min if field_min is not None else lo,
+                    field_max if field_max is not None else hi)
+
     cbar = fig.colorbar(im, ax=ax, label="|χ| (arb. units)")
     cbar.ax.tick_params(direction="in")
 
@@ -164,6 +216,7 @@ class FMRTab(QWidget):
         self._fm      = file_manager
         self._results: list = []    # list of (label, fields, f, mFFTs)
         self._worker  = None
+        self._dataset_included: dict = {}   # {label: bool} — which to plot
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -176,12 +229,17 @@ class FMRTab(QWidget):
         root.setContentsMargins(4, 4, 4, 4)
         root.addWidget(splitter)
 
-        # ── LEFT: parameter panel ─────────────────────────────────────
+        # ── LEFT: scroll-able parameter panel ─────────────────────────
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setMinimumWidth(270)
+        left_scroll.setMaximumWidth(330)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         ctrl_widget = QWidget()
         ctrl_layout = QVBoxLayout(ctrl_widget)
         ctrl_layout.setContentsMargins(4, 4, 4, 4)
-        ctrl_widget.setMaximumWidth(270)
-        splitter.addWidget(ctrl_widget)
+        left_scroll.setWidget(ctrl_widget)
+        splitter.addWidget(left_scroll)
 
         # Simulation parameters
         param_grp  = QGroupBox("FMR Parameters")
@@ -249,6 +307,20 @@ class FMRTab(QWidget):
         self._freq_max_spin.setSuffix(" GHz")
         disp_form.addRow("Max freq:", self._freq_max_spin)
 
+        self._field_unit_combo = QComboBox()
+        self._field_unit_combo.addItems(["T", "Oe"])
+        self._field_unit_combo.setToolTip("Magnetic field axis unit (1 T = 10000 Oe)")
+        disp_form.addRow("Field unit:", self._field_unit_combo)
+
+        self._fieldmin_edit = QLineEdit()
+        self._fieldmin_edit.setPlaceholderText("auto")
+        self._fieldmin_edit.setToolTip("Lower field limit in the selected unit (blank = auto)")
+        self._fieldmax_edit = QLineEdit()
+        self._fieldmax_edit.setPlaceholderText("auto")
+        self._fieldmax_edit.setToolTip("Upper field limit in the selected unit (blank = auto)")
+        disp_form.addRow("Field min:", self._fieldmin_edit)
+        disp_form.addRow("Field max:", self._fieldmax_edit)
+
         ctrl_layout.addWidget(disp_grp)
 
         # Progress + run
@@ -264,6 +336,12 @@ class FMRTab(QWidget):
         self._refresh_btn = QPushButton("Refresh Heatmaps")
         self._refresh_btn.clicked.connect(self._refresh_heatmaps)
         ctrl_layout.addWidget(self._refresh_btn)
+
+        self._dataset_btn = QPushButton("Dataset Selection…")
+        self._dataset_btn.setToolTip(
+            "Choose which loaded datasets are plotted in the heatmap and slices.")
+        self._dataset_btn.clicked.connect(self._open_dataset_selection)
+        ctrl_layout.addWidget(self._dataset_btn)
 
         # ── RIGHT: analysis tabs ──────────────────────────────────────
         right_tabs = QTabWidget()
@@ -338,6 +416,45 @@ class FMRTab(QWidget):
         self._vmin_edit.setEnabled(not checked)
         self._vmax_edit.setEnabled(not checked)
 
+    # ── field unit / range helpers (read by heatmap + slices) ─────────
+
+    def field_unit(self) -> str:
+        return self._field_unit_combo.currentText()
+
+    def field_scale(self) -> float:
+        """Multiply a field in Tesla by this to get the displayed unit."""
+        return OE_PER_TESLA if self.field_unit() == "Oe" else 1.0
+
+    def field_limits(self):
+        """(min, max) in the displayed unit, or None where blank/invalid."""
+        def _p(edit):
+            t = edit.text().strip()
+            try:
+                return float(t) if t else None
+            except ValueError:
+                return None
+        return _p(self._fieldmin_edit), _p(self._fieldmax_edit)
+
+    # ── dataset selection ─────────────────────────────────────────────
+
+    def included_results(self, results):
+        """Filter *results* to the datasets enabled in the selection dialog."""
+        inc = self._dataset_included
+        if not inc:
+            return results
+        out = [r for r in results if inc.get(r[0], True)]
+        return out or results   # never return nothing
+
+    def _open_dataset_selection(self) -> None:
+        labels = [e.label for e in self._fm.entries]
+        if not labels:
+            QMessageBox.information(self, "No Data", "Add files first.")
+            return
+        dlg = _FMRDatasetDialog(labels, self._dataset_included, self)
+        if dlg.exec():
+            self._dataset_included = dlg.result_state()
+            self._refresh_heatmaps()
+
     def _refresh_heatmaps(self) -> None:
         if not self._results:
             return
@@ -354,14 +471,19 @@ class FMRTab(QWidget):
                     "Falling back to Auto range."
                 )
                 auto = True
+        field_min, field_max = self.field_limits()
         self._heatmap_tab.plot_heatmaps(
-            self._results,
+            self.included_results(self._results),
             cmap        = self._cmap_combo.currentText(),
             log_scale   = self._log_chk.isChecked(),
             auto_range  = auto,
             vmin        = vmin,
             vmax        = vmax,
             freq_max_ghz= self._freq_max_spin.value(),
+            field_scale = self.field_scale(),
+            field_unit  = self.field_unit(),
+            field_min   = field_min,
+            field_max   = field_max,
         )
 
     # ── public accessor for slice tab ─────────────────────────────────
@@ -408,6 +530,12 @@ class _HeatmapSubTab(QWidget):
         self._ppt_btn = QPushButton("Save Heatmaps to PPT")
         self._ppt_btn.clicked.connect(self._do_save_ppt)
         ppt_row.addWidget(self._ppt_btn)
+        self._png_btn = QPushButton("Save All as PNG")
+        self._png_btn.setToolTip(
+            "Save every heatmap as a PNG into a chosen folder, using the same "
+            "image settings as the PPT export.")
+        self._png_btn.clicked.connect(self._save_all_png)
+        ppt_row.addWidget(self._png_btn)
         layout.addLayout(ppt_row)
 
         # Plot size (per heatmap) + DPI — view and save
@@ -436,11 +564,15 @@ class _HeatmapSubTab(QWidget):
         self._last_params: dict = {}
 
     def plot_heatmaps(self, results, cmap, log_scale, auto_range,
-                      vmin, vmax, freq_max_ghz):
+                      vmin, vmax, freq_max_ghz,
+                      field_scale=1.0, field_unit="T",
+                      field_min=None, field_max=None):
         self._last_results = results
         self._last_params = dict(
             cmap=cmap, log_scale=log_scale, auto_range=auto_range,
             vmin=vmin, vmax=vmax, freq_max_ghz=freq_max_ghz,
+            field_scale=field_scale, field_unit=field_unit,
+            field_min=field_min, field_max=field_max,
         )
 
         # clear previous
@@ -458,8 +590,59 @@ class _HeatmapSubTab(QWidget):
                 canvas.fig, canvas.single_ax, label, fields, f, mFFTs,
                 cmap=cmap, log_scale=log_scale, auto_range=auto_range,
                 vmin=vmin, vmax=vmax, freq_max_ghz=freq_max_ghz,
+                field_scale=field_scale, field_unit=field_unit,
+                field_min=field_min, field_max=field_max,
             )
             canvas.draw()
+
+    # ── Image rendering (shared by PPT + PNG export) ──────────────────
+
+    def _render_all_pngs(self, outdir: Path, named: bool = False) -> list:
+        from matplotlib.figure import Figure
+        import re
+        p = self._last_params
+        paths = []
+        for i, (label, fields, f, mFFTs) in enumerate(self._last_results):
+            fig = Figure(figsize=(self._w_spin.value(), self._h_spin.value()),
+                         dpi=self._dpi_spin.value(), tight_layout=True)
+            ax  = fig.add_subplot(111)
+            render_heatmap(
+                fig, ax, label, fields, f, mFFTs,
+                cmap=p["cmap"], log_scale=p["log_scale"],
+                auto_range=p["auto_range"], vmin=p["vmin"],
+                vmax=p["vmax"], freq_max_ghz=p["freq_max_ghz"],
+                field_scale=p.get("field_scale", 1.0),
+                field_unit=p.get("field_unit", "T"),
+                field_min=p.get("field_min"), field_max=p.get("field_max"),
+            )
+            if named:
+                safe = re.sub(r"[^\w\-]+", "_", label).strip("_") or f"heatmap_{i+1}"
+                name = f"{i+1:02d}_{safe}.png"
+            else:
+                name = f"heatmap_{i}.png"
+            png = outdir / name
+            fig.savefig(png)
+            paths.append(str(png))
+        return paths
+
+    def _save_all_png(self):
+        if not self._last_results:
+            QMessageBox.information(self, "Nothing to export",
+                                    "Run FMR processing first.")
+            return
+        outdir = QFileDialog.getExistingDirectory(
+            self, "Select folder to save PNGs", self._settings.value("png_dir", ""))
+        if not outdir:
+            return
+        self._settings.setValue("png_dir", outdir)
+        from pathlib import Path
+        try:
+            paths = self._render_all_pngs(Path(outdir), named=True)
+        except Exception as e:
+            QMessageBox.critical(self, "PNG Export Error", str(e))
+            return
+        QMessageBox.information(self, "Saved PNGs",
+                                f"Saved {len(paths)} heatmap PNG(s) to:\n{outdir}")
 
     # ── PowerPoint export ─────────────────────────────────────────────
 
@@ -489,25 +672,8 @@ class _HeatmapSubTab(QWidget):
         self._settings.setValue("ppt_path", str(ppt_path))
 
         import tempfile
-        from matplotlib.figure import Figure
-
-        p = self._last_params
         tmpdir = Path(tempfile.mkdtemp(prefix="mumax_fmr_ppt_"))
-        images = []
-        for i, (label, fields, f, mFFTs) in enumerate(self._last_results):
-            # Fresh figure at the chosen size, Origin-styled.
-            fig = Figure(figsize=(self._w_spin.value(), self._h_spin.value()),
-                         dpi=self._dpi_spin.value(), tight_layout=True)
-            ax  = fig.add_subplot(111)
-            render_heatmap(
-                fig, ax, label, fields, f, mFFTs,
-                cmap=p["cmap"], log_scale=p["log_scale"],
-                auto_range=p["auto_range"], vmin=p["vmin"],
-                vmax=p["vmax"], freq_max_ghz=p["freq_max_ghz"],
-            )
-            png = tmpdir / f"heatmap_{i}.png"
-            fig.savefig(png)
-            images.append(str(png))
+        images = self._render_all_pngs(tmpdir)
 
         title = f"FMR heatmaps — {len(images)} dataset" \
                 f"{'s' if len(images) != 1 else ''}"
@@ -574,6 +740,8 @@ class _BaseSliceTab(QWidget):
     _val_unit: str = ""           # displayed next to the input, e.g. "GHz" or "T"
     _val_default: float = 5.0
     _limit_by_freq: bool = False  # if True, clip the x-axis to the Max freq setting
+    _x_is_field: bool = False     # x-axis is magnetic field (apply unit + range)
+    _val_is_field: bool = False   # the entered value is a magnetic field
 
     def __init__(self, owner=None, parent=None):
         super().__init__(parent)
@@ -594,7 +762,8 @@ class _BaseSliceTab(QWidget):
         self._val_edit = QLineEdit(str(self._val_default))
         self._val_edit.setPlaceholderText(f"value in {self._val_unit}")
         val_row.addWidget(self._val_edit)
-        val_row.addWidget(QLabel(self._val_unit))
+        self._val_unit_lbl = QLabel(self._val_unit)
+        val_row.addWidget(self._val_unit_lbl)
         ctrl_form.addRow("Value:", val_row)
 
         self._log_chk = QCheckBox("Log Y scale")
@@ -649,6 +818,10 @@ class _BaseSliceTab(QWidget):
         self._ppt_btn = QPushButton("Save to PPT")
         self._ppt_btn.clicked.connect(self._do_save_ppt)
         ppt_row.addWidget(self._ppt_btn)
+        self._png_btn = QPushButton("Save PNG")
+        self._png_btn.setToolTip("Save the current slice as a PNG (same image settings).")
+        self._png_btn.clicked.connect(self._save_png)
+        ppt_row.addWidget(self._png_btn)
         layout.addLayout(ppt_row)
 
         self._canvas = PlotCanvas(self, n_rows=1, n_cols=1, figsize=(8, 5))
@@ -673,6 +846,13 @@ class _BaseSliceTab(QWidget):
                                 f"Enter a number in {self._val_unit}.")
             return
 
+        # Field unit (from the FMR panel)
+        scale = self._owner.field_scale() if self._owner is not None else 1.0
+        unit  = self._owner.field_unit()  if self._owner is not None else "T"
+        if self._val_is_field:
+            self._val_unit_lbl.setText(unit)
+            val = val / scale             # entered value is in display unit → Tesla
+
         # Optional upper limit on the frequency axis (from the Max freq setting)
         freq_max = None
         if self._limit_by_freq and self._owner is not None:
@@ -681,12 +861,18 @@ class _BaseSliceTab(QWidget):
             except Exception:
                 freq_max = None
 
+        results = (self._owner.included_results(self._results)
+                   if self._owner is not None else self._results)
+
         curves, y_sets = [], []
         x_plot = x_label = y_label = None
-        for (label, fields, f, mFFTs) in self._results:
+        for (label, fields, f, mFFTs) in results:
             x_plot, y, x_label, y_label = self._compute_slice(
                 fields, f, mFFTs, val
             )
+            if self._x_is_field:
+                x_plot = x_plot * scale
+                x_label = f"Magnetic Field ({unit})"
             if freq_max is not None:
                 mask   = x_plot <= freq_max
                 x_plot = x_plot[mask]
@@ -721,6 +907,14 @@ class _BaseSliceTab(QWidget):
         style_axis(ax)   # publication ("Origin") styling
         if not self._yauto_chk.isChecked():
             self._apply_ylim(ax, warn=warn)
+
+        # Field-axis range (freq slice only) from the FMR panel
+        if self._x_is_field and self._owner is not None:
+            fmin, fmax = self._owner.field_limits()
+            if fmin is not None or fmax is not None:
+                lo, hi = ax.get_xlim()
+                ax.set_xlim(fmin if fmin is not None else lo,
+                            fmax if fmax is not None else hi)
 
     def _on_yauto_toggled(self, checked: bool) -> None:
         self._ymin_edit.setEnabled(not checked)
@@ -822,6 +1016,30 @@ class _BaseSliceTab(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
+    def _save_png(self) -> None:
+        if not self._last_curves:
+            QMessageBox.information(self, "Nothing to save", "Plot a slice first.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Slice PNG", self._settings.value("png_path", ""),
+            "PNG image (*.png)")
+        if not path:
+            return
+        if not path.lower().endswith(".png"):
+            path += ".png"
+        self._settings.setValue("png_path", path)
+        from matplotlib.figure import Figure
+        fig = Figure(figsize=(self._w_spin.value(), self._h_spin.value()),
+                     dpi=self._dpi_spin.value(), tight_layout=True)
+        ax = fig.add_subplot(111)
+        self._render_slice(ax, warn=False)
+        try:
+            fig.savefig(path)
+        except Exception as e:
+            QMessageBox.critical(self, "PNG Export Error", str(e))
+            return
+        QMessageBox.information(self, "Saved PNG", f"Saved to:\n{path}")
+
     # ── override in subclass ──────────────────────────────────────────
 
     def _compute_slice(self, fields, f, mFFTs, val):
@@ -840,6 +1058,7 @@ class _FreqSliceTab(_BaseSliceTab):
     """
     _val_unit    = "GHz"
     _val_default = 5.0
+    _x_is_field  = True          # x-axis is magnetic field → apply unit + range
 
     def _compute_slice(self, fields, f, mFFTs, val):
         Fmeas = val * 1e9                          # GHz → Hz
@@ -861,10 +1080,11 @@ class _FieldSliceTab(_BaseSliceTab):
     _val_unit    = "T"
     _val_default = 0.05
     _limit_by_freq = True        # follow the Max freq setting on the x-axis
+    _val_is_field  = True        # the entered value is a magnetic field
 
     def _compute_slice(self, fields, f, mFFTs, val):
         x, y    = get_mfft_at_field(fields, mFFTs, f, Bstat=val)
         x_plot  = x * 1e-9                         # Hz → GHz
         x_label = "Frequency (GHz)"
-        y_label = f"|FFT(m)| at {val:.4g} T  (arb. units)"
+        y_label = "|FFT(m)|  (arb. units)"
         return x_plot, y, x_label, y_label

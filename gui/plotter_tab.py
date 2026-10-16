@@ -223,6 +223,13 @@ class PlotterTab(QWidget):
         ppt_btn = QPushButton("Save Bundle to PPT")
         ppt_btn.clicked.connect(self._save_ppt)
         e_lay.addWidget(ppt_btn)
+
+        png_btn = QPushButton("Save All as PNG")
+        png_btn.setToolTip(
+            "Save every plot as a PNG into a chosen folder, using the same "
+            "image settings (aspect, font, DPI, limits) as the PPT export.")
+        png_btn.clicked.connect(self._save_all_png)
+        e_lay.addWidget(png_btn)
         ctrl.addWidget(e_grp)
 
         ctrl.addStretch()
@@ -432,6 +439,49 @@ class PlotterTab(QWidget):
         self._preview_canvas = canvas
 
     # ------------------------------------------------------------------
+    # Shared image rendering (same settings for PPT and PNG export)
+    # ------------------------------------------------------------------
+    def _render_all_pngs(self, outdir: Path, named: bool = False) -> list[str]:
+        """Render every plot to a PNG in *outdir*; return the paths."""
+        from matplotlib.figure import Figure
+        import re
+        common = self._bundle["common"]
+        aspect = float(common.get("aspect", 1.4))
+        h = 4.0
+        paths = []
+        for i, pl in enumerate(self._bundle["plots"]):
+            fig = Figure(figsize=(aspect * h, h), dpi=200, tight_layout=True)
+            ax = fig.add_subplot(111)
+            render_plot_item(fig, ax, pl, common)
+            if named:
+                safe = re.sub(r"[^\w\-]+", "_", (pl.get("title") or f"plot_{i+1}")).strip("_")
+                name = f"{i+1:02d}_{safe or 'plot'}.png"
+            else:
+                name = f"plot_{i}.png"
+            p = outdir / name
+            fig.savefig(p)
+            paths.append(str(p))
+        return paths
+
+    def _save_all_png(self) -> None:
+        if not self._bundle["plots"]:
+            QMessageBox.information(self, "Empty", "No plots to export.")
+            return
+        outdir = QFileDialog.getExistingDirectory(
+            self, "Select folder to save PNGs", self._settings.value("png_dir", ""))
+        if not outdir:
+            return
+        self._settings.setValue("png_dir", outdir)
+        self._commit_ui_to_bundle()
+        try:
+            paths = self._render_all_pngs(Path(outdir), named=True)
+        except Exception as e:
+            QMessageBox.critical(self, "PNG Export Error", str(e))
+            return
+        QMessageBox.information(self, "Saved PNGs",
+                                f"Saved {len(paths)} PNG file(s) to:\n{outdir}")
+
+    # ------------------------------------------------------------------
     # PPT export (9 per slide)
     # ------------------------------------------------------------------
     def _browse_ppt(self) -> None:
@@ -457,21 +507,8 @@ class PlotterTab(QWidget):
         self._commit_ui_to_bundle()
 
         import tempfile
-        from matplotlib.figure import Figure
-        common = self._bundle["common"]
-        aspect = float(common.get("aspect", 1.4))
-        h = 4.0
         tmpdir = Path(tempfile.mkdtemp(prefix="mumax_bundle_ppt_"))
-
-        # render every plot to a PNG
-        pngs = []
-        for i, pl in enumerate(plots):
-            fig = Figure(figsize=(aspect * h, h), dpi=200, tight_layout=True)
-            ax = fig.add_subplot(111)
-            render_plot_item(fig, ax, pl, common)
-            p = tmpdir / f"plot_{i}.png"
-            fig.savefig(p)
-            pngs.append(str(p))
+        pngs = self._render_all_pngs(tmpdir)
 
         # 9 per slide
         try:
